@@ -16,9 +16,8 @@ import os
 import re
 import sys
 import time
-import zipfile
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import PurePath
@@ -27,7 +26,6 @@ from typing import Any, Literal
 
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 
 from data_explorer.core import JSONValue, json_object
 
@@ -40,7 +38,9 @@ HEADER_SCAN_ROWS = 20
 DECIMAL_SCAN_ROWS = 200
 SHEET_SCAN_ROWS = 200
 MAX_HEADER_ROW = 19
+XLSX_MAX_ROWS = 1_048_576  # the row limit of Excel itself; a <row r=...> beyond it is not a real sheet
 DATE_SHARE_PERCENT = 95
+DATE_LIKE_PERCENT = 50
 ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
 DELIMITERS = (",", ";", "\t", "|")
 DECIMALS = (".", ",")
@@ -95,13 +95,22 @@ LEADING_ZERO = re.compile(r"-?0\d")
 MAX_INT_DIGITS = 15
 DATE_HINT = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
 UTC_OFFSET = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})")
+DATE_LIKE = re.compile(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4}")
+# Tried in order: ISO forms first, then day-first forms. There is no month-first format on purpose.
 DATE_FORMATS = (
     ("%Y-%m-%d", re.compile(r"\d{4}-\d{2}-\d{2}")),
     ("%Y-%m-%d %H:%M", re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}")),
+    ("%Y-%m-%d %H:%M:%S", re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")),
+    ("%Y-%m-%d %H:%M:%S.%f", re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{1,6}")),
+    ("%Y-%m-%dT%H:%M", re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")),
     ("%Y-%m-%dT%H:%M:%S", re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")),
+    ("%Y-%m-%dT%H:%M:%S.%f", re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,6}")),
     ("%d/%m/%Y", re.compile(r"\d{1,2}/\d{1,2}/\d{4}")),
     ("%d/%m/%Y %H:%M", re.compile(r"\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}")),
+    ("%d/%m/%Y %H:%M:%S", re.compile(r"\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2}")),
     ("%d.%m.%Y", re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}")),
+    ("%d.%m.%Y %H:%M", re.compile(r"\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}")),
+    ("%d.%m.%Y %H:%M:%S", re.compile(r"\d{1,2}\.\d{1,2}\.\d{4} \d{1,2}:\d{2}:\d{2}")),
 )
 
 
@@ -374,17 +383,25 @@ def detect_header_row(rows: Sequence[Sequence[object]]) -> int:
 def _open_workbook(data: bytes, file_name: str) -> Any:
     try:
         return load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    except (zipfile.BadZipFile, InvalidFileException, KeyError, ValueError, OSError, EOFError) as exc:
+    except Exception as exc:  # openpyxl leaks zipfile, zlib, XML and index errors from damaged files
         raise LoadError("parse_failed", f"{file_name} could not be read as an Excel workbook.") from exc
+
+
+def _no_worksheets(file_name: str) -> LoadError:
+    return LoadError("no_columns", f"{file_name} has no worksheets, so it contains no columns.")
 
 
 def _sheet_titles(workbook: Any) -> tuple[str, ...]:
     return tuple(str(sheet.title) for sheet in workbook.worksheets)
 
 
-def _pick_sheet(workbook: Any) -> str:
-    best, best_count = _sheet_titles(workbook)[0], -1
+def _pick_sheet(workbook: Any, file_name: str = "the workbook") -> str:
+    titles = _sheet_titles(workbook)
+    if not titles:
+        raise _no_worksheets(file_name)
+    best, best_count = titles[0], -1
     for sheet in workbook.worksheets:
+        sheet.reset_dimensions()  # a wrong <dimension> must not pad the rows
         count = 0
         for row in sheet.iter_rows(max_row=SHEET_SCAN_ROWS, values_only=True):
             count += sum(1 for cell in row if not _is_blank(cell))
@@ -406,6 +423,10 @@ def detect_sheet(data: bytes) -> str:
     workbook = _open_workbook(data, "the workbook")
     try:
         return _pick_sheet(workbook)
+    except LoadError:
+        raise
+    except Exception as exc:
+        raise LoadError("parse_failed", f"The workbook could not be read: {_first_line(exc)}") from exc
     finally:
         workbook.close()
 
@@ -469,10 +490,11 @@ def _parse_numbers(values: Sequence[str], decimal: str) -> tuple[list[int | floa
 
 def _parse_dates(
     stripped: Sequence[str | None], total: int, name: str
-) -> tuple[pd.Series[Any], list[str]] | None:
+) -> tuple[pd.Series[Any] | None, list[str]]:
+    """The parsed column and its warnings; no series when the column stays text (maybe with a warning)."""
     present = [value for value in stripped if value is not None]
     if not any(DATE_HINT.match(value) for value in present[:50]):
-        return None
+        return None, []
     values = pd.Series(list(stripped), dtype="object")
     if sum(1 for value in present if UTC_OFFSET.fullmatch(value)) * 100 >= DATE_SHARE_PERCENT * total:
         parsed = pd.to_datetime(values, format="ISO8601", utc=True, errors="coerce").dt.tz_localize(None)
@@ -496,7 +518,9 @@ def _parse_dates(
                     "and are now missing."
                 )
             return parsed.astype("datetime64[us]"), warnings
-    return None
+    if sum(1 for value in present if DATE_LIKE.match(value)) * 100 >= DATE_LIKE_PERCENT * total:
+        return None, [f"Column '{name}' looks like dates but no known format matched; kept as text."]
+    return None, []
 
 
 def _infer_strings(
@@ -521,10 +545,10 @@ def _infer_strings(
         if all_int:
             return pd.Series(values, dtype="Int64" if missing else "int64"), []
         return pd.Series(values, dtype="float64"), []
-    dates = _parse_dates(stripped, len(present), name)
+    dates, date_warnings = _parse_dates(stripped, len(present), name)
     if dates is not None:
-        return dates
-    return pd.Series(list(cleaned), dtype="str"), []
+        return dates, date_warnings
+    return pd.Series(list(cleaned), dtype="str"), date_warnings
 
 
 def _infer_text_column(raw: Sequence[object], decimal: str, name: str) -> _Column:
@@ -632,8 +656,7 @@ def _load_csv(data: bytes, file_name: str, options: LoadOptions, limits: Limits)
         raise LoadError(
             "decode_failed", f"{file_name} does not look like a text file (it contains NUL bytes)."
         )
-    if text.startswith("﻿"):
-        text = text[1:]
+    text = text.removeprefix(chr(0xFEFF))
     if not text.strip():
         raise LoadError("no_columns", f"{file_name} contains no columns.")
     sample = text[:DETECT_BYTES]
@@ -685,31 +708,68 @@ def _last_filled(row: Sequence[object]) -> int:
     return 0
 
 
+def _bounded_rows(worksheet: Any, max_cols: int) -> Iterator[tuple[list[object], int]]:
+    """Rows of a sheet read lazily, each cut to ``max_cols`` cells, with the width its cells need.
+
+    The width is 0 for a row that fits; for a longer row it is the position of its last filled cell, which
+    can exceed ``max_cols`` (too many columns) or not (blank padding). Row widths are what the cells in the
+    XML say: the sheet's ``<dimension>`` is dropped first, because a wrong one pads every row to that width.
+    """
+    worksheet.reset_dimensions()
+    for row in worksheet.iter_rows(max_row=XLSX_MAX_ROWS, values_only=True):
+        if len(row) > max_cols:
+            yield list(row[:max_cols]), _last_filled(row)
+        else:
+            yield list(row), 0
+
+
+def _read_xlsx_rows(
+    worksheet: Any, file_name: str, options: LoadOptions, limits: Limits
+) -> tuple[int, list[object], list[list[object]], int]:
+    """Header row, header cells, non-blank body rows and the widest row; stops once the row limit is passed."""
+    stream = _bounded_rows(worksheet, limits.max_cols)
+    head = list(itertools.islice(stream, HEADER_SCAN_ROWS))
+    header_row = (
+        options.header_row if options.header_row is not None else detect_header_row([r for r, _ in head])
+    )
+    if header_row >= len(head):
+        raise LoadError("no_columns", f"{file_name} contains no columns.")
+    names, wide = head[header_row]
+    body: list[list[object]] = []
+    for row, row_wide in itertools.chain(head[header_row + 1 :], stream):
+        wide = max(wide, row_wide)
+        if _last_filled(row) > 0:
+            body.append(row)
+            if len(body) > limits.max_rows:
+                raise LoadError(
+                    "too_many_rows",
+                    f"{file_name} has more than {limits.max_rows:,} rows; the limit is {limits.max_rows:,} rows.",
+                )
+    return header_row, names, body, wide
+
+
 def _load_xlsx(data: bytes, file_name: str, options: LoadOptions, limits: Limits) -> _Table:
     workbook = _open_workbook(data, file_name)
     try:
         sheets = _sheet_titles(workbook)
+        if not sheets:
+            raise _no_worksheets(file_name)
         if options.sheet is not None and options.sheet not in sheets:
             raise LoadError(
                 "sheet_not_found",
                 f"{file_name} has no sheet named {options.sheet!r}; it has {', '.join(sheets)}.",
             )
-        sheet = options.sheet if options.sheet is not None else _pick_sheet(workbook)
-        rows = [list(row) for row in workbook[sheet].iter_rows(values_only=True)]
+        sheet = options.sheet if options.sheet is not None else _pick_sheet(workbook, file_name)
+        header_row, names, body, wide = _read_xlsx_rows(workbook[sheet], file_name, options, limits)
     except LoadError:
         raise
-    except (zipfile.BadZipFile, KeyError, ValueError, OSError, TypeError) as exc:
+    except Exception as exc:  # openpyxl leaks zipfile, zlib, XML and index errors from damaged files
         raise LoadError(
             "parse_failed", f"{file_name} could not be read as an Excel workbook: {_first_line(exc)}"
         ) from exc
     finally:
         workbook.close()
-    header_row = options.header_row if options.header_row is not None else detect_header_row(rows)
-    if header_row >= len(rows):
-        raise LoadError("no_columns", f"{file_name} contains no columns.")
-    names = rows[header_row]
-    body = [row for row in rows[header_row + 1 :] if _last_filled(row) > 0]
-    width = max([_last_filled(names)] + [_last_filled(row) for row in body])
+    width = max([_last_filled(names), wide] + [_last_filled(row) for row in body])
     if width == 0:
         raise LoadError("no_columns", f"{file_name} contains no columns.")
     _check_shape(file_name, len(body), width, limits)

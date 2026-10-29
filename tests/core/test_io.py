@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
+import io
 import json
+import re
+import struct
 import sys
+import time
+import zipfile
 from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
 import pytest
+from openpyxl import Workbook
 
 from data_explorer.core import io as dio
 from data_explorer.core.io import (
@@ -32,6 +39,45 @@ from data_explorer.core.io import (
 )
 
 Read = Callable[[str], bytes]
+
+
+def make_xlsx(rows: list[list[Any]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    for row in rows:
+        sheet.append(row)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def patch_member(data: bytes, member: str, change: Callable[[bytes], bytes]) -> bytes:
+    """The zip with one member rewritten, as the same container otherwise."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for item in source.infolist():
+            content = source.read(item.filename)
+            target.writestr(item, change(content) if item.filename == member else content)
+    return out.getvalue()
+
+
+def damage_member(data: bytes, member: str) -> bytes:
+    """Flip bytes inside the compressed stream of one member, leaving the zip directory intact."""
+    info = zipfile.ZipFile(io.BytesIO(data)).getinfo(member)
+    name_length, extra_length = struct.unpack("<HH", data[info.header_offset + 26 : info.header_offset + 30])
+    start = info.header_offset + 30 + name_length + extra_length
+    damaged = bytearray(data)
+    for position in range(start + 4, start + 12):
+        damaged[position] ^= 0xFF
+    return bytes(damaged)
+
+
+SHEET = "xl/worksheets/sheet1.xml"
+DIMENSION = re.compile(rb'<dimension ref="[^"]*"\s*/>')
 
 
 @pytest.mark.parametrize(
@@ -137,6 +183,38 @@ def test_ambiguous_dates_parse_day_first_and_month_first_stays_text() -> None:
     assert pd.api.types.is_string_dtype(df["d"]) and report.date_columns == ()
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("2025-03-01 08:15:30", "2025-03-02 09:45:10", "2025-03-01 08:15:30"),
+        ("2025-03-01 08:15:30.25", "2025-03-02 09:45:10.5", "2025-03-01 08:15:30.25"),
+        ("2025-03-01T08:15", "2025-03-02T09:45", "2025-03-01 08:15:00"),
+        ("2025-03-01T08:15:30.125", "2025-03-02T09:45:10.5", "2025-03-01 08:15:30.125"),
+        ("10.03.2025 08:15", "11.03.2025 09:45", "2025-03-10 08:15:00"),
+        ("10.03.2025 08:15:30", "11.03.2025 09:45:10", "2025-03-10 08:15:30"),
+        ("10/03/2025 08:15:30", "11/03/2025 09:45:10", "2025-03-10 08:15:30"),
+    ],
+)
+def test_common_timestamp_formats_become_datetime_columns(first: str, second: str, expected: str) -> None:
+    df, report = load_table(f"t\n{first}\n{second}\n".encode(), "t.csv")
+    assert df["t"].dtype == "datetime64[us]" and df["t"].iloc[0] == pd.Timestamp(expected)
+    assert df["t"].notna().all() and report.date_columns == ("t",) and report.warnings == ()
+
+
+def test_dates_in_an_unknown_format_stay_text_with_a_warning() -> None:
+    cases = (
+        b"d\n1-3-2025\n2-3-2025\n",
+        b"d\n12/31/2024\n01/15/2025\n",
+        b"d\n2025-03-01\n2025-03-01 08:15:30\n",
+    )
+    for data in cases:
+        df, report = load_table(data, "d.csv")
+        assert pd.api.types.is_string_dtype(df["d"]) and report.date_columns == ()
+        assert report.warnings == ("Column 'd' looks like dates but no known format matched; kept as text.",)
+    df, report = load_table(b"firmware,note\n2.4.1,soon\n2.4.1,later\n", "f.csv")
+    assert report.warnings == () and pd.api.types.is_string_dtype(df["firmware"])
+
+
 def test_booleans_leading_zeros_and_long_integers() -> None:
     df, _ = load_table(b"flag,code,big,n\nTRUE,007,1234567890123456,1\nfalse,010,2,\n", "t.csv")
     assert df["flag"].dtype == "bool" and df["flag"].tolist() == [True, False]
@@ -187,6 +265,87 @@ def test_limits_raise_with_the_limit_in_the_message(tight_limits: Any) -> None:
         with pytest.raises(LoadError) as caught:
             load_table(data, "big.csv", limits=tight_limits)
         assert caught.value.code == code and text in caught.value.message
+
+
+def test_a_byte_order_mark_left_in_the_text_is_dropped() -> None:
+    df, report = load_table(b"\xef\xbb\xbfa,b\n1,2\n", "bom.csv", LoadOptions(encoding="utf-8"))
+    assert list(df.columns) == ["a", "b"] and report.renamed_columns == ()
+
+
+def test_inflated_xlsx_dimension_does_not_inflate_the_read() -> None:
+    rows: list[list[Any]] = [["id", "ratio", "label"]] + [[i, i / 4, f"x{i}"] for i in range(2000)]
+    honest = make_xlsx(rows)
+    inflated = patch_member(honest, SHEET, lambda xml: DIMENSION.sub(b'<dimension ref="A1:XFD2001"/>', xml))
+    assert b'ref="A1:XFD2001"' in zipfile.ZipFile(io.BytesIO(inflated)).read(SHEET)
+    expected, _ = load_table(honest, "honest.xlsx")
+    started = time.perf_counter()
+    df, report = load_table(inflated, "inflated.xlsx")
+    assert time.perf_counter() - started < 1.0
+    assert df.shape == (2000, 3) and (report.n_rows, report.n_cols) == (2000, 3) and report.warnings == ()
+    pd.testing.assert_frame_equal(df, expected)
+    assert detect_sheet(inflated) == "Sheet"
+
+
+def test_xlsx_row_limit_counts_filled_rows_and_stops_reading(tight_limits: Any) -> None:
+    tight_limits = dataclasses.replace(tight_limits, max_bytes=MiB)  # a workbook is bigger than 2,000 bytes
+    header: list[Any] = ["a", "b"]
+    df, _ = load_table(make_xlsx([header] + [[i, i] for i in range(50)]), "fits.xlsx", limits=tight_limits)
+    assert len(df) == 50
+    with pytest.raises(LoadError) as caught:
+        load_table(make_xlsx([header] + [[i, i] for i in range(51)]), "long.xlsx", limits=tight_limits)
+    assert caught.value.code == "too_many_rows" and "the limit is 50 rows" in caught.value.message
+    blanks: list[list[Any]] = [header] + [[i, i] for i in range(40)] + [["  ", None]] * 30
+    df, report = load_table(make_xlsx(blanks), "blanks.xlsx", limits=tight_limits)
+    assert len(df) == 40 and report.n_rows == 40
+
+
+def test_xlsx_column_limit_uses_the_cells_that_are_filled(tight_limits: Any) -> None:
+    tight_limits = dataclasses.replace(tight_limits, max_bytes=MiB)  # a workbook is bigger than 2,000 bytes
+    for cells in (list("abcdef"), ["a", None, None, None, None, None, None, None, None, "j"]):
+        with pytest.raises(LoadError) as caught:
+            load_table(make_xlsx([cells, [1] * len(cells)]), "wide.xlsx", limits=tight_limits)
+        assert caught.value.code == "too_many_columns" and "the limit is 5 columns" in caught.value.message
+    inflated = patch_member(
+        make_xlsx([list("abcde"), [1, 2, 3, 4, 5]]),
+        SHEET,
+        lambda xml: DIMENSION.sub(b'<dimension ref="A1:XFD2"/>', xml),
+    )
+    df, _ = load_table(inflated, "five.xlsx", limits=tight_limits)
+    assert df.shape == (1, 5)
+
+
+def test_damaged_xlsx_parts_are_load_errors() -> None:
+    good = make_xlsx([["a", "b"], [1, 2], [3, 4]])
+    cases = {
+        "garbage sheet": patch_member(good, SHEET, lambda _: b"<<< not xml"),
+        "truncated sheet": patch_member(good, SHEET, lambda xml: xml[: xml.index(b'<row r="3"') + 20]),
+        "damaged stream": damage_member(good, SHEET),
+        "garbage workbook part": patch_member(good, "xl/workbook.xml", lambda _: b"\x00\x01 nonsense"),
+    }
+    for label, data in cases.items():
+        with pytest.raises(LoadError) as caught:
+            load_table(data, "damaged.xlsx")
+        assert caught.value.code == "parse_failed" and "damaged.xlsx" in caught.value.message, label
+        with pytest.raises(LoadError) as caught:
+            detect_sheet(data)
+        assert caught.value.code == "parse_failed", label
+
+
+def test_xlsx_without_worksheets_has_no_columns() -> None:
+    empty = patch_member(
+        make_xlsx([["a"], [1]]),
+        "xl/workbook.xml",
+        lambda xml: re.sub(rb"<sheets>.*</sheets>", b"<sheets/>", xml),
+    )
+    assert list_sheets(empty) == ()
+    for call in (
+        lambda: load_table(empty, "none.xlsx"),
+        lambda: load_table(empty, "none.xlsx", LoadOptions(sheet="Sheet")),
+        lambda: detect_sheet(empty),
+    ):
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert caught.value.code == "no_columns" and "no worksheets" in caught.value.message
 
 
 def test_check_order_empty_then_size_then_type(tight_limits: Any) -> None:
