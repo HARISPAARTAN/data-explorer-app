@@ -1,0 +1,106 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-explorer-app"
+version = "0.1.0"
+description = "Upload a CSV or Excel file and get statistics, data quality, filters, charts and downloads; runs in the browser with stlite or on a server with Docker."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Harithas Harikaran" }]
+keywords = ["streamlit", "stlite", "pandas", "altair", "data-quality", "csv", "excel"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Operating System :: OS Independent",
+  "Intended Audience :: End Users/Desktop",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+  "altair==6.0.0",
+  "click>=8.1,<9",
+  "numpy>=2.3,<3",
+  "openpyxl==3.1.5",
+  "pandas==3.0.2",
+  "streamlit==1.65.0",
+]
+
+[project.urls]
+Homepage = "https://harispaartan.github.io/data-explorer-app/"
+Source = "https://github.com/HARISPAARTAN/data-explorer-app"
+Changelog = "https://github.com/HARISPAARTAN/data-explorer-app/blob/main/CHANGELOG.md"
+
+[project.scripts]
+data-explorer = "data_explorer.cli:main"
+
+[dependency-groups]
+dev = [
+  "hypothesis==6.170.13",
+  "mypy==2.4.1",
+  "pandas-stubs==3.0.5.260914",
+  "pytest==9.2.0",
+  "ruff==0.17.3",
+  "types-openpyxl==3.1.5.20261017",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_explorer"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/data_explorer",
+  "tests",
+  "fixtures",
+  "README.md",
+  "README.de.md",
+  "CHANGELOG.md",
+  "LICENSE",
+  "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["web/py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/data_explorer"]
+exclude = ["src/data_explorer/app/pages/"]
+warn_unused_configs = true
+warn_redundant_casts = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["data_explorer.core", "data_explorer.core.*"]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
+testpaths = ["tests"]
+filterwarnings = [
+  "error::FutureWarning:data_explorer",
+  "error::DeprecationWarning:data_explorer",
+]

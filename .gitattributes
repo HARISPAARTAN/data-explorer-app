@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.xlsx binary
+*.xls binary
+*.bin binary
+*.woff2 binary
+fixtures/** -text
+src/data_explorer/samples/** -text
+web/py/data_explorer/samples/** -text
