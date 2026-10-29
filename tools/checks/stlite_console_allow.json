@@ -1,0 +1,11 @@
+[
+  {
+    "text": "Failed to load resource: net::ERR_NAME_NOT_RESOLVED",
+    "url_prefix": "https://stlite.invalid/media/",
+    "reason": "stlite 1.12.0 media URLs use the placeholder host stlite.invalid, which never resolves; Streamlit's download button checks its URL when it renders, the download itself works. No upstream issue found."
+  },
+  {
+    "text": "Client Error: Download Button fetch error - Failed to fetch",
+    "reason": "The same render-time media check of the download button, logged by the Streamlit frontend inside stlite 1.12.0 after the stlite.invalid request failed. No upstream issue found."
+  }
+]
