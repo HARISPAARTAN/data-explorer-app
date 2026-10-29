@@ -56,6 +56,10 @@ def _escape(series: pd.Series[Any]) -> pd.Series[Any]:
     return text.where(~risky, "'" + text)
 
 
+def _escape_label(label: str) -> str:
+    return "'" + label if label.startswith(FORMULA_PREFIXES) else label
+
+
 def to_csv_bytes(df: pd.DataFrame, dialect: Dialect = "comma", escape_formulas: bool = True) -> bytes:
     """The frame as CSV: comma (UTF-8, decimal point) or semicolon (UTF-8 with BOM, decimal comma)."""
     if dialect not in ("comma", "semicolon"):
@@ -73,8 +77,12 @@ def to_csv_bytes(df: pd.DataFrame, dialect: Dialect = "comma", escape_formulas: 
             columns[str(name)] = series
     frame = pd.DataFrame(columns, index=df.index)
     semicolon = dialect == "semicolon"
+    # The labels are escaped on the way out and the keys of ``columns`` stay as they are: two labels that
+    # escape to the same text must not merge into one column.
+    header = [_escape_label(label) if escape_formulas else label for label in columns]
     text = frame.to_csv(
         index=False,
+        header=header,
         sep=";" if semicolon else ",",
         decimal="," if semicolon else ".",
         lineterminator="\n",

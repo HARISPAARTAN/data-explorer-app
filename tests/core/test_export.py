@@ -79,6 +79,52 @@ def test_escaping_switch_carriage_return_and_numbers(mixed: pd.DataFrame) -> Non
     assert numbers == b"v\n-5\n3\n"
 
 
+LINK = '=HYPERLINK("http://x",y)'
+QUOTED_ESCAPED_LINK = '"' + ("'" + LINK).replace('"', '""') + '"'  # the apostrophe, then CSV quoting
+
+
+def formula_header_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            LINK: pd.Series(["=1+1", "ok"], dtype="str"),
+            "name": pd.Series(["a", "b"], dtype="str"),
+            "+n": [1, 2],
+            "@SUM(A1)": [0.5, 1.5],
+            "-3": pd.Series(["-x", "y"], dtype="str"),
+            "\tt": [True, False],
+        }
+    )
+
+
+def test_formula_like_headers_are_escaped_in_both_dialects() -> None:
+    frame = formula_header_frame()
+    before = frame.copy()
+    comma = to_csv_bytes(frame).decode("utf-8").split("\n")
+    assert comma[0] == QUOTED_ESCAPED_LINK + ",name,'+n,'@SUM(A1),'-3,'\tt"
+    assert comma[1:3] == ["'=1+1,a,1,0.5,'-x,True", "ok,b,2,1.5,y,False"]
+    semicolon = to_csv_bytes(frame, "semicolon")
+    assert semicolon.startswith(b"\xef\xbb\xbf")
+    lines = semicolon[3:].decode("utf-8").split("\n")
+    assert lines[0] == QUOTED_ESCAPED_LINK + ";name;'+n;'@SUM(A1);'-3;'\tt"
+    assert lines[1:3] == ["'=1+1;a;1;0,5;'-x;True", "ok;b;2;1,5;y;False"]
+    pd.testing.assert_frame_equal(frame, before)
+
+
+def test_headers_are_left_alone_when_escaping_is_off_or_not_needed() -> None:
+    raw = to_csv_bytes(formula_header_frame(), escape_formulas=False).decode("utf-8").split("\n")
+    assert raw[0] == '"' + LINK.replace('"', '""') + '",name,+n,@SUM(A1),-3,\tt'
+    plain = pd.DataFrame({"it's": [1], "a=b": [2], "": [3]})
+    assert to_csv_bytes(plain) == b"it's,a=b,\n1,2,3\n"
+
+
+def test_labels_that_escape_to_the_same_text_stay_two_columns() -> None:
+    frame = pd.DataFrame({"=a": [1], "'=a": [2], "x": [3]})
+    for escape in (True, False):
+        data = to_csv_bytes(frame, escape_formulas=escape)
+        expected = b"'=a,'=a,x\n1,2,3\n" if escape else b"=a,'=a,x\n1,2,3\n"
+        assert data == expected
+
+
 def test_other_column_types() -> None:
     df = pd.DataFrame(
         {
