@@ -7,7 +7,7 @@ import json
 import streamlit as st
 
 from data_explorer.app import cache, state, ui
-from data_explorer.core.export import export_file_name, profile_json, profile_markdown, to_csv_bytes
+from data_explorer.core.export import MIME, export_file_name, profile_json, profile_markdown, to_csv_bytes
 from data_explorer.core.filters import FilterError, format_filter
 
 DIALECTS = {
@@ -56,7 +56,7 @@ st.download_button(
     "Download CSV",
     csv_bytes,
     export_file_name(report.file_name, "csv"),
-    mime="text/csv",
+    mime=MIME["csv"],
     key="w.d.csv",
     on_click="ignore",
 )
@@ -86,7 +86,7 @@ st.download_button(
     "Download profile (JSON)",
     as_json,
     export_file_name(report.file_name, "json"),
-    mime="application/json",
+    mime=MIME["json"],
     key="w.d.json",
     on_click="ignore",
 )
@@ -94,7 +94,7 @@ st.download_button(
     "Download profile (Markdown)",
     as_markdown,
     export_file_name(report.file_name, "md"),
-    mime="text/markdown",
+    mime=MIME["md"],
     key="w.d.md",
     on_click="ignore",
 )
