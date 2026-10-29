@@ -12,3 +12,4 @@ build/
 .kit-src/
 node_modules/
 .coverage
+web/.kit-*
