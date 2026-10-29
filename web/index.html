@@ -30,7 +30,9 @@
     .de-shots { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
     .de-shots img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
     .de-intro code { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
+    .de-reason { color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   </style>
+  <noscript><style>#root{display:none}</style></noscript>
 </head>
 <body>
   <noscript>
@@ -63,6 +65,7 @@
         <h1 class="pf-card__title">The live demo cannot start in this browser</h1>
         <p>This demo runs Python inside your browser with WebAssembly and module workers. This browser does not support them or has them switched off, or the runtime could not be downloaded.</p>
         <p>Try a current version of Chrome, Edge, Firefox or Safari, look at the screenshots below, or run the app yourself: <code>uv sync</code> and <code>uv run data-explorer run</code>, or <code>docker build -t data-explorer .</code> and <code>docker run -p 8501:8501 data-explorer</code>.</p>
+        <p class="de-reason" hidden></p>
         <div class="de-shots">
           <img src="assets/upload-1440.png" width="1440" height="900" alt="Upload page of the data explorer with the retail orders sample loaded">
           <img src="assets/visualise-1440.png" width="1440" height="900" alt="Visualise page of the data explorer with a weekly line chart">
@@ -127,6 +130,7 @@
     const STLITE_CSS = 'https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.0/build/stlite.css';
     const STLITE_JS = 'https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.0/build/stlite.js';
     const REPO_URL = 'https://github.com/HARISPAARTAN/data-explorer-app';
+    const IMPORT_TIMEOUT_MS = 60_000;
     const root = document.getElementById('root');
 
     mountBanner({ repoUrl: REPO_URL });
@@ -152,10 +156,23 @@
       return asked;
     }
 
+    // Any failure to start ends here: the fallback card, with the reason under its text.
     function showFallback(reason) {
-      root.replaceChildren(document.getElementById('fallback').content.cloneNode(true));
+      const card = document.getElementById('fallback').content.cloneNode(true);
+      const detail = card.querySelector('.de-reason');
+      detail.textContent = `Details: ${reason}.`;
+      detail.hidden = false;
+      root.replaceChildren(card);
       root.dataset.state = 'fallback';
       console.info(`The live demo did not start: ${reason}.`);
+    }
+
+    function withTimeout(promise, milliseconds) {
+      let timer;
+      const expired = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`no answer after ${milliseconds / 1000} s`)), milliseconds);
+      });
+      return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
     }
 
     function loadStylesheet(href) {
@@ -174,15 +191,19 @@
         showFallback('WebAssembly or module workers are not available');
         return;
       }
-      const config = JSON.parse(document.getElementById('app-config').textContent);
-      const theme = window.pfTheme && window.pfTheme.get() === 'light' ? 'light' : 'dark';
       let stlite;
       try {
-        [stlite] = await Promise.all([import(STLITE_JS), loadStylesheet(STLITE_CSS)]);
+        [stlite] = await withTimeout(
+          Promise.all([import(STLITE_JS), loadStylesheet(STLITE_CSS)]),
+          IMPORT_TIMEOUT_MS,
+        );
       } catch (error) {
         showFallback(`the runtime could not be downloaded (${error.message})`);
         return;
       }
+      const config = JSON.parse(document.getElementById('app-config').textContent);
+      const theme = window.pfTheme && window.pfTheme.get() === 'light' ? 'light' : 'dark';
+      if (!config.themes[theme]) throw new Error(`the page has no ${theme} theme`);
       const files = Object.fromEntries(Object.entries(config.files).map(([path, url]) => [path, { url }]));
       stlite.mount(
         {
@@ -196,7 +217,8 @@
       root.dataset.state = 'mounted';
     }
 
-    start();
+    // The same fallback for a failure after the download: a bad config, a bad theme, a mount that throws.
+    start().catch((error) => showFallback(`the app could not be started (${error.message})`));
   </script>
 </body>
 </html>

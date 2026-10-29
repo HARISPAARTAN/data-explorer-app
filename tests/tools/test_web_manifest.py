@@ -103,6 +103,22 @@ def test_stlite_is_requested_only_after_the_checks(html: str) -> None:
     assert "cdn.jsdelivr.net" not in head
 
 
+def test_start_up_failures_reach_the_fallback(html: str) -> None:
+    head = html[: html.index("</head>")]
+    assert (
+        "<noscript><style>#root{display:none}</style></noscript>" in head
+    )  # no loading card over <noscript>
+    script = html[html.index('<script type="module">') :]
+    assert "const IMPORT_TIMEOUT_MS = 60_000;" in script
+    assert (
+        script.index("await withTimeout(") < script.index("import(STLITE_JS)") < script.index("stlite.mount(")
+    )
+    # the JSON, the theme and the mount come after the import and are covered by the same fallback
+    assert script.index("JSON.parse(") > script.index("import(STLITE_JS)")
+    assert "start().catch((error) => showFallback(" in script
+    assert html.count('class="de-reason" hidden') == 1  # only the template shows a reason
+
+
 def test_no_csp_no_sri_no_storage_writes_no_cookies(html: str) -> None:
     lowered = html.lower()
     assert "content-security-policy" not in lowered and "integrity=" not in lowered
