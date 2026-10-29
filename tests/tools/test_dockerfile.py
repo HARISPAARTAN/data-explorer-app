@@ -44,8 +44,8 @@ def test_stages_user_and_entrypoint(dockerfile: str, repo_root: Path) -> None:
         "ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/app/.venv"
         in lines
     )
-    assert "RUN uv sync --frozen --no-dev --no-install-project --no-editable" in lines
-    assert "RUN uv sync --frozen --no-dev --no-editable" in lines
+    assert "RUN uv sync --locked --no-dev --no-install-project --no-editable" in lines
+    assert "RUN uv sync --locked --no-dev --no-editable" in lines
     assert "USER app" in lines and any("--uid 10001" in line and line.endswith(" app") for line in lines)
     assert "EXPOSE 8501" in lines
     assert "COPY .streamlit/config.toml ./.streamlit/config.toml" in lines
@@ -55,6 +55,17 @@ def test_stages_user_and_entrypoint(dockerfile: str, repo_root: Path) -> None:
         '"--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]'
     )
     assert (repo_root / "src/data_explorer/app/streamlit_app.py").is_file()
+
+
+def test_layer_order(dockerfile: str) -> None:
+    lines = instructions(dockerfile)
+    syncs = [n for n, line in enumerate(lines) if line.startswith("RUN uv sync ")]
+    assert len(syncs) == 2
+    manifest = lines.index("COPY pyproject.toml uv.lock ./")
+    sources = lines.index("COPY src ./src")
+    assert manifest < syncs[0] < sources < syncs[1]
+    useradd = next(n for n, line in enumerate(lines) if line.startswith("RUN useradd "))
+    assert useradd < lines.index("USER app")
 
 
 def test_health_check_uses_python(dockerfile: str) -> None:

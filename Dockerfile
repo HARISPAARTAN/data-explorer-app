@@ -10,10 +10,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.8@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/app/.venv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project --no-editable
+RUN uv sync --locked --no-dev --no-install-project --no-editable
 COPY README.md LICENSE ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --locked --no-dev --no-editable
 
 # --- Runtime: the venv, the sources and the server config under /app, as an unprivileged user
 FROM base
