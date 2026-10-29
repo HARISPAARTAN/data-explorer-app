@@ -9,7 +9,14 @@ from types import ModuleType
 
 import pytest
 
-USES = re.compile(r"^\s*-?\s*uses:\s*(\S+)\s*$", re.M)
+# "uses: owner/name@ref", optionally followed by a "# v1.2.3" comment that names the tag a commit pin stands for.
+USES = re.compile(r"^[ \t]*-?[ \t]*uses:[ \t]*(\S+)[ \t]*(?:#[^\n]*)?$", re.M)
+ACTION_REF = re.compile(r"[\w.-]+/[\w./-]+@(?:v\d+|[0-9a-f]{40})")
+
+TIMEOUTS = {
+    "ci": {"lint": 15, "test": 30, "core-py314": 20, "docker": 20, "stlite-local": 30},
+    "pages": {"deploy": 15, "smoke": 30},
+}
 
 
 @pytest.fixture(scope="module")
@@ -37,6 +44,25 @@ def job(text: str, name: str) -> str:
     match = re.search(rf"^  {re.escape(name)}:\s*$(.*?)(?=^  [a-z0-9-]+:\s*$|\Z)", body, re.M | re.S)
     assert match is not None, name
     return match.group(1)
+
+
+def steps_of(text: str, action: str) -> list[str]:
+    """The step bodies (up to the next step) that follow each ``uses: <action>@``."""
+    return [part.split("\n      - ", 1)[0] for part in text.split(f"uses: {action}@")[1:]]
+
+
+def test_only_the_two_documented_workflows_exist(repo_root: Path) -> None:
+    folder = repo_root / ".github" / "workflows"
+    assert sorted(path.name for path in folder.iterdir()) == ["ci.yml", "pages.yml"]
+
+
+@pytest.mark.parametrize("name", ["ci", "pages"])
+def test_every_job_has_the_expected_timeout(name: str, ci: str, pages: str) -> None:
+    text = ci if name == "ci" else pages
+    assert jobs(text) == list(TIMEOUTS[name])
+    for job_name, minutes in TIMEOUTS[name].items():
+        found = re.findall(r"^    timeout-minutes: (\d+)$", job(text, job_name), re.M)
+        assert found == [str(minutes)], job_name
 
 
 def test_ci_jobs_and_matrix(ci: str) -> None:
@@ -74,7 +100,10 @@ def test_one_uv_version_everywhere(ci: str, repo_root: Path) -> None:
     dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
     docker_uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)@", dockerfile)
     assert docker_uv is not None
-    setups = re.findall(r"uses: astral-sh/setup-uv@v\d+\n\s+with:\n\s+version: \"([\d.]+)\"", ci)
+    setups = re.findall(
+        r"uses: astral-sh/setup-uv@(?:v\d+|[0-9a-f]{40})[ \t]*(?:#[^\n]*)?\n\s+with:\n\s+version: \"([\d.]+)\"",
+        ci,
+    )
     assert len(setups) == ci.count("astral-sh/setup-uv@") == 3
     assert set(setups) == {docker_uv.group(1)}
 
@@ -91,6 +120,8 @@ def test_docker_job(ci: str) -> None:
     assert "seq 1 60" in docker
     assert "docker logs" in docker and "docker rm -f" in docker
     assert docker.count("if: always()") == 2
+    curls = [line for line in docker.splitlines() if "curl " in line]
+    assert len(curls) == 3 and all("--max-time 5" in line for line in curls)
 
 
 @pytest.mark.parametrize("workflow", ["ci", "pages"])
@@ -103,6 +134,28 @@ def test_smoke_jobs(workflow: str, ci: str, pages: str) -> None:
     assert "OUT: ${{ runner.temp }}/smoke" in text
     assert "actions/upload-artifact@" in text and "if: always()" in text
     assert "PLAYWRIGHT_FROM" not in text
+
+
+@pytest.mark.parametrize(
+    ("workflow", "artifact", "folder"),
+    [("ci", "stlite-smoke", "smoke"), ("pages", "stlite-smoke-live", "smoke-live")],
+)
+def test_smoke_artifact_is_the_out_directory(
+    workflow: str, artifact: str, folder: str, ci: str, pages: str
+) -> None:
+    text = job(ci, "stlite-local") if workflow == "ci" else job(pages, "smoke")
+    (upload,) = steps_of(text, "actions/upload-artifact")
+    out = re.findall(r"^\s+OUT: (.+)$", text, re.M)
+    assert out == ["${{ runner.temp }}/" + folder]
+    assert re.findall(r"^\s+name: (\S+)$", upload, re.M) == [artifact]
+    assert re.findall(r"^\s+path: (.+)$", upload, re.M) == out
+    assert re.findall(r"^\s+retention-days: (\d+)$", upload, re.M) == ["14"]
+
+
+def test_local_smoke_names_its_url(ci: str) -> None:
+    stlite = job(ci, "stlite-local")
+    assert "          URL: http://127.0.0.1:8000/\n" in stlite
+    assert "-d web" in stlite and "--bind 127.0.0.1" in stlite
 
 
 def test_pages_deploys_web_only(pages: str) -> None:
@@ -122,10 +175,33 @@ def test_permissions_actions_and_secrets(name: str, ci: str, pages: str) -> None
     text = ci if name == "ci" else pages
     assert "\npermissions:\n  contents: read\n" in text
     actions = USES.findall(text)
-    assert actions
+    assert actions and len(actions) == text.count("uses:")
     for action in actions:
-        assert re.fullmatch(r"[\w.-]+/[\w./-]+@v\d+", action), action
-    assert "secrets." not in text and "GITHUB_TOKEN" not in text
+        assert ACTION_REF.fullmatch(action), action
+    for forbidden in ["pull_request_target", "secrets.", "GITHUB_TOKEN"]:
+        assert forbidden not in text, forbidden
+
+
+@pytest.mark.parametrize("name", ["ci", "pages"])
+def test_write_permissions_only_in_the_pages_deploy_job(name: str, ci: str, pages: str) -> None:
+    text = ci if name == "ci" else pages
+    if name == "pages":
+        text = text.replace(job(pages, "deploy"), "")
+    assert re.search(r":[ \t]*write", text) is None
+
+
+@pytest.mark.parametrize("name", ["ci", "pages"])
+def test_every_checkout_drops_its_credentials(name: str, ci: str, pages: str) -> None:
+    text = ci if name == "ci" else pages
+    checkouts = steps_of(text, "actions/checkout")
+    assert len(checkouts) == text.count("actions/checkout@") == (6 if name == "ci" else 2)
+    for step in checkouts:
+        assert re.search(r"^ {10}persist-credentials: false$", step, re.M), step
+
+
+def test_concurrency(ci: str, pages: str) -> None:
+    assert "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n" in ci
+    assert "  group: pages\n  cancel-in-progress: false\n" in pages
 
 
 def test_dependabot(dependabot: str) -> None:
@@ -135,3 +211,17 @@ def test_dependabot(dependabot: str) -> None:
     for name in ["streamlit", "pandas", "altair", "openpyxl"]:
         assert f"- dependency-name: {name}\n" in uv_block, name
     assert dependabot.count("interval: weekly") == 3
+
+
+def test_dependabot_prefixes_and_action_group(dependabot: str) -> None:
+    blocks = {
+        name: block
+        for block in dependabot.split("\n  - ")[1:]
+        for name in re.findall(r"^package-ecosystem: (\S+)", block)
+    }
+    prefixes = {
+        name: re.findall(r"^    commit-message:\n      prefix: \"([^\"]+)\"$", block, re.M)
+        for name, block in blocks.items()
+    }
+    assert prefixes == {"uv": ["build(deps)"], "github-actions": ["ci"], "docker": ["build(deps)"]}
+    assert 'patterns: ["*"]' in blocks["github-actions"]  # one PR for all action bumps

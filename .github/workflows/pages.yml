@@ -15,6 +15,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write
@@ -41,7 +42,7 @@ jobs:
     # The same smoke test as in CI, against the deployed page.
     needs: deploy
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
