@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from data_explorer.app import ui
+from data_explorer.core import charts
 from data_explorer.core.filters import parse_filter
 
 CHARTS = ["Histogram", "Bar", "Line", "Scatter", "Correlation heatmap"]
+
+
+def chart_spec(at: AppTest) -> dict[str, Any]:
+    spec: dict[str, Any] = json.loads(at.get("vega_lite_chart")[0].proto.spec)
+    return spec
 
 
 @pytest.mark.parametrize("chart", CHARTS)
@@ -36,9 +45,48 @@ def test_captions_state_the_aggregation(
     at.radio(key="w.c.type").set_value("Bar").run()
     assert at.selectbox(key="w.c.category").options[0] == "store"
     assert at.main.caption[-1].value == "Sum of revenue_eur per store."
+    at.selectbox(key="w.c.category").set_value("payment").run()
+    assert at.main.caption[-1].value == "Sum of revenue_eur per payment."
     goto(at, "2_Overview")
     goto(at, "5_Visualise")
-    assert at.radio(key="w.c.type").value == "Bar" and at.selectbox(key="w.c.category").value == "store"
+    assert at.radio(key="w.c.type").value == "Bar" and at.selectbox(key="w.c.category").value == "payment"
+    assert at.session_state["de.chart"]["category"] == "payment"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_histogram_uses_the_theme_palette(
+    loaded: Callable[..., AppTest],
+    goto: Callable[[AppTest, str], AppTest],
+    monkeypatch: pytest.MonkeyPatch,
+    theme: str,
+) -> None:
+    monkeypatch.setattr(ui, "chart_theme", lambda: theme)
+    at = goto(loaded("retail_orders"), "5_Visualise")
+    assert chart_spec(at)["mark"]["color"] == charts.PALETTE[theme][0]
+
+
+def test_split_line_uses_the_light_palette(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ui, "chart_theme", lambda: "light")
+    at = goto(loaded("retail_orders"), "5_Visualise")
+    at.radio(key="w.c.type").set_value("Line").run()
+    at.selectbox(key="w.c.split").set_value("payment").run()
+    assert chart_spec(at)["encoding"]["color"]["scale"]["range"][0] == charts.PALETTE["light"][0]
+
+
+def test_histogram_counts_only_the_filtered_rows(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = loaded("retail_orders")
+    at.session_state["de.filter"] = parse_filter('`store` = "Milan"')
+    goto(at, "5_Visualise")
+    milan = int((at.session_state["de.df"]["store"] == "Milan").sum())
+    assert milan >= 1_000
+    assert f"{milan:,}" in at.main.caption[-1].value
+    assert at.main.caption[-1].value.startswith("30 equal-width bins over ")
+    at.toggle(key="w.c.filtered").set_value(False).run()
+    assert "6,060 non-missing values" in at.main.caption[-1].value
 
 
 def test_explore_filter_is_used(
