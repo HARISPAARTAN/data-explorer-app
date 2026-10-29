@@ -397,8 +397,8 @@ def test_xlsx_column_limit_uses_the_cells_that_are_filled(tight_limits: Any) -> 
 SHARED_STRINGS = "xl/sharedStrings.xml"
 
 
-def with_shared_strings(data: bytes, megabytes: int) -> bytes:
-    """The workbook plus a shared-strings part that unpacks to ``megabytes`` MiB and deflates to a few KiB."""
+def with_part(data: bytes, name: str, body: bytes) -> bytes:
+    """The workbook plus one more member, deflated."""
     out = io.BytesIO()
     with (
         zipfile.ZipFile(io.BytesIO(data)) as source,
@@ -406,10 +406,14 @@ def with_shared_strings(data: bytes, megabytes: int) -> bytes:
     ):
         for item in source.infolist():
             target.writestr(item, source.read(item.filename))
-        entry = b"<si><t>x</t></si>"
-        body = b"<sst>" + entry * (megabytes * MiB // len(entry)) + b"</sst>"
-        target.writestr(SHARED_STRINGS, body)
+        target.writestr(name, body)
     return out.getvalue()
+
+
+def with_shared_strings(data: bytes, megabytes: int) -> bytes:
+    """The workbook plus a shared-strings part that unpacks to ``megabytes`` MiB and deflates to a few KiB."""
+    entry = b"<si><t>x</t></si>"
+    return with_part(data, SHARED_STRINGS, b"<sst>" + entry * (megabytes * MiB // len(entry)) + b"</sst>")
 
 
 def test_workbook_declaring_a_huge_part_is_refused_before_openpyxl_reads_it(
@@ -457,6 +461,64 @@ def test_unpacked_size_cap_is_ten_times_the_upload_limit(tight_limits: Any) -> N
     with pytest.raises(LoadError) as caught:
         list_sheets(data, "short.xlsx", short)
     assert caught.value.code == "too_large" and "short.xlsx unpacks to" in caught.value.message
+
+
+def shared_strings_of_size(size: int) -> bytes:
+    """An ``sst`` element padded with spaces to exactly ``size`` bytes; it deflates to a few hundred bytes."""
+    return b"<sst>" + b" " * (size - len(b"<sst></sst>")) + b"</sst>"
+
+
+@pytest.mark.parametrize(
+    ("limits", "megabytes", "limit"),
+    [(SERVER_LIMITS, 60, "50 MB"), (BROWSER_LIMITS, 25, "20 MB")],
+    ids=["server", "browser"],
+)
+def test_a_huge_shared_strings_part_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch, limits: dio.Limits, megabytes: int, limit: str
+) -> None:
+    declared = megabytes * MiB
+    assert declared <= dio.XLSX_EXPANSION * limits.max_bytes  # only the per-part cap can refuse it
+    bomb = with_part(make_xlsx([["a", "b"], [1, 2]]), SHARED_STRINGS, shared_strings_of_size(declared))
+    assert len(bomb) < MiB // 4  # a few KiB of Deflate stand for the whole part
+
+    def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("openpyxl was asked to open the workbook")
+
+    monkeypatch.setattr(dio, "load_workbook", never)
+    monkeypatch.setattr(dio, "current_limits", lambda: limits)  # what a call without limits uses
+    calls = {  # label: (name in the message, call)
+        "load_table": ("bomb.xlsx", lambda: load_table(bomb, "bomb.xlsx", limits=limits)),
+        "list_sheets": ("bomb.xlsx", lambda: list_sheets(bomb, "bomb.xlsx")),
+        "detect_sheet": ("the workbook", lambda: detect_sheet(bomb)),
+    }
+    for label, (name, call) in calls.items():
+        started = time.perf_counter()
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert time.perf_counter() - started < 2.0, label
+        assert caught.value.code == "too_large", label
+        assert caught.value.message == (
+            f"{name} has xl/sharedStrings.xml unpacking to {megabytes} MB; "
+            f"the limit is {limit} unpacked for that part (the upload limit)."
+        ), label
+
+
+def test_shared_strings_part_may_declare_exactly_the_upload_limit(tight_limits: Any) -> None:
+    limits = dataclasses.replace(tight_limits, max_bytes=100_000)  # the total cap, 1,000,000, is far away
+    base = make_xlsx([["a", "b"], [1, 2]])
+    at_limit = with_part(base, SHARED_STRINGS, shared_strings_of_size(100_000))
+    df, _ = load_table(at_limit, "limit.xlsx", limits=limits)
+    assert list(df.columns) == ["a", "b"] and df.shape == (1, 2)
+    over = with_part(base, SHARED_STRINGS, shared_strings_of_size(100_001))
+    for call in (
+        lambda: load_table(over, "over.xlsx", limits=limits),
+        lambda: list_sheets(over, "over.xlsx", limits),
+        lambda: detect_sheet(over, limits),
+    ):
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert caught.value.code == "too_large"
+        assert "unpacking to 100,001 bytes; the limit is 100,000 bytes" in caught.value.message
 
 
 def test_a_normal_workbook_still_loads_under_the_default_limits(fixture_bytes: Read) -> None:

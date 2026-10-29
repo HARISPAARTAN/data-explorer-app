@@ -41,6 +41,7 @@ SHEET_SCAN_ROWS = 200
 MAX_HEADER_ROW = 19
 XLSX_MAX_ROWS = 1_048_576  # the row limit of Excel itself; a <row r=...> beyond it is not a real sheet
 XLSX_EXPANSION = 10  # a workbook may declare at most this many times the upload limit once unpacked
+XLSX_SHARED_STRINGS = "xl/sharedStrings.xml"  # parsed whole on open; it may declare at most the upload limit
 DATE_SHARE_PERCENT = 95
 DATE_LIKE_PERCENT = 50
 ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
@@ -383,21 +384,30 @@ def detect_header_row(rows: Sequence[Sequence[object]]) -> int:
 
 
 def _check_unpacked_size(data: bytes, file_name: str, limits: Limits) -> None:
-    """Refuse a workbook whose parts declare more than 10 times the upload limit once unpacked.
+    """Refuse a workbook that declares too much once unpacked.
 
-    openpyxl parses ``xl/sharedStrings.xml`` completely on open, and Deflate reaches about 1,000:1, so a few
-    hundred KB can cost gigabytes. The sizes come from the zip directory; ``zipfile`` stops a member at its
-    declared size, so the declared total bounds the work.
+    Two caps, both on the sizes in the zip directory (``zipfile`` stops a member at its declared size, so
+    they bound the work): all parts together at most 10 times the upload limit, and ``xl/sharedStrings.xml``
+    at most the upload limit. openpyxl parses the shared strings completely on open, and Deflate reaches
+    about 1,000:1, so a few hundred KB of that part cost tens of seconds and over a gigabyte.
     """
     cap = XLSX_EXPANSION * limits.max_bytes
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        declared = sum(item.file_size for item in archive.infolist())
+        items: list[zipfile.ZipInfo] = archive.infolist()
+    declared: int = sum(item.file_size for item in items)
     if declared > cap:
         raise LoadError(
             "too_large",
             f"{file_name} unpacks to {_size_text(declared)}; the limit is {_size_text(cap)} unpacked "
             f"({XLSX_EXPANSION} times the upload limit).",
         )
+    for item in items:
+        if item.filename == XLSX_SHARED_STRINGS and item.file_size > limits.max_bytes:
+            raise LoadError(
+                "too_large",
+                f"{file_name} has {XLSX_SHARED_STRINGS} unpacking to {_size_text(item.file_size)}; "
+                f"the limit is {_size_text(limits.max_bytes)} unpacked for that part (the upload limit).",
+            )
 
 
 def _open_workbook(data: bytes, file_name: str, limits: Limits | None = None) -> Any:
