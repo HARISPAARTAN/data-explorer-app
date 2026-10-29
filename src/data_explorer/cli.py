@@ -94,7 +94,10 @@ def samples(out: Path) -> None:
     """Copy the three sample datasets into a folder."""
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise click.ClickException(f"{out} is not an empty folder.")
-    out.mkdir(parents=True, exist_ok=True)
-    for name in SAMPLE_FILES:
-        shutil.copyfile(SAMPLES_DIR / name, out / name)
-        click.echo(f"Wrote {out / name}")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        for name in SAMPLE_FILES:
+            shutil.copyfile(SAMPLES_DIR / name, out / name)
+            click.echo(f"Wrote {out / name}")
+    except OSError as exc:
+        raise click.ClickException(f"Could not write the samples: {exc}") from exc

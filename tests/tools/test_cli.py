@@ -104,3 +104,14 @@ def test_samples_refuse_a_file(tmp_path: Path) -> None:
     target.write_text("x", encoding="utf-8")
     result = CliRunner().invoke(cli.main, ["samples", "--out", str(target)])
     assert result.exit_code == 1 and "is not an empty folder" in result.output
+
+
+def test_samples_report_a_folder_that_cannot_be_created(tmp_path: Path) -> None:
+    blocker = tmp_path / "file.txt"
+    blocker.write_text("x", encoding="utf-8")
+    result = CliRunner().invoke(cli.main, ["samples", "--out", str(blocker / "sub")])
+    assert result.exit_code == 1
+    assert "Error: Could not write the samples: " in result.output
+    assert "Traceback" not in result.output and result.exception is not None
+    assert isinstance(result.exception, SystemExit)
+    assert blocker.read_text(encoding="utf-8") == "x"
