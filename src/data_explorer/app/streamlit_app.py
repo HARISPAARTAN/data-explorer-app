@@ -8,12 +8,12 @@ from data_explorer.app import cache, state, ui
 from data_explorer.core.io import (
     DEFAULT_OPTIONS,
     SAMPLES,
+    Limits,
     LoadError,
     LoadOptions,
     LoadReport,
     current_limits,
     dataset_id,
-    list_sheets,
     sample_bytes,
 )
 
@@ -23,11 +23,8 @@ DELIMITERS = {"Detect": None, "Comma": ",", "Semicolon": ";", "Tab": "\t", "Pipe
 DECIMALS = {"Detect": None, "Point": ".", "Comma": ","}
 
 
-def sheet_names(data: bytes, file_name: str) -> list[str]:
-    try:
-        return list(list_sheets(data, file_name))
-    except LoadError:
-        return []
+def sheet_names(data: bytes, file_name: str, limits: Limits) -> list[str]:
+    return list(cache.sheets(data, file_name, cache.limits_key(limits)))
 
 
 def show_success(report: LoadReport) -> None:
@@ -66,7 +63,7 @@ if source == SOURCES[0]:
         decimal = st.selectbox("Decimal separator", list(DECIMALS), key="w.decimal")
         sheet = "Detect"
         if uploaded is not None and uploaded.name.lower().endswith(".xlsx"):
-            sheets = ["Detect", *sheet_names(uploaded.getvalue(), uploaded.name)]
+            sheets = ["Detect", *sheet_names(uploaded.getvalue(), uploaded.name, limits)]
             state.seed("w.sheet", "Detect", sheets)
             sheet = st.selectbox("Sheet", sheets, key="w.sheet")
         header_row = st.number_input(

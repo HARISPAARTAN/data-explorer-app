@@ -12,7 +12,15 @@ import pandas as pd
 import streamlit as st
 
 from data_explorer.core.filters import apply_view, view_from_json
-from data_explorer.core.io import Limits, LoadOptions, LoadReport, load_sample, load_table
+from data_explorer.core.io import (
+    Limits,
+    LoadError,
+    LoadOptions,
+    LoadReport,
+    list_sheets,
+    load_sample,
+    load_table,
+)
 from data_explorer.core.profile import DatasetProfile, profile_dataset
 from data_explorer.core.quality import QualityReport, missing_matrix, quality_report
 
@@ -28,6 +36,18 @@ def load(
     data: bytes, file_name: str, options_json: str, limits: LimitsKey
 ) -> tuple[pd.DataFrame, LoadReport]:
     return load_table(data, file_name, LoadOptions.from_json(options_json), Limits(*limits))
+
+
+@st.cache_data(max_entries=3, show_spinner=False)
+def sheets(data: bytes, file_name: str, limits: LimitsKey) -> tuple[str, ...]:
+    """The sheet names of a workbook, empty when it cannot be opened (Load shows the reason).
+
+    Keyed by the bytes and the name, so the workbook is opened once per upload, not on every rerun.
+    """
+    try:
+        return list_sheets(data, file_name, Limits(*limits))
+    except LoadError:
+        return ()
 
 
 @st.cache_data(max_entries=3, show_spinner=False)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -79,6 +82,53 @@ def test_workbook_offers_its_sheets(
     assert at.success[0].value == "Loaded header_offset_two_sheets.xlsx: 30 rows × 4 columns."
 
 
+def test_workbook_is_opened_once_per_upload_not_once_per_rerun(
+    app: Callable[[], AppTest], fixture_bytes: Callable[[str], bytes], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from data_explorer.app import cache
+
+    calls: list[str] = []
+    real = cache.list_sheets
+
+    def counting(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+        calls.append("opened")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "list_sheets", counting)
+    at = app()
+    at.run()
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    at.file_uploader[0].upload(
+        "header_offset_two_sheets.xlsx", fixture_bytes("header_offset_two_sheets.xlsx"), mime
+    ).run()
+    at.number_input(key="w.header_row").set_value(2).run()
+    at.selectbox(key="w.delimiter").set_value("Tab").run()
+    at.run()
+    assert not at.exception
+    assert at.selectbox(key="w.sheet").options == ["Detect", "Summary", "Data"]
+    assert calls == ["opened"]
+
+
+def test_workbook_that_unpacks_too_large_is_refused_in_place(
+    app: Callable[[], AppTest], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATA_EXPLORER_MAX_MB", "1")  # 10 MB once unpacked
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/sharedStrings.xml", b"<sst>" + b"<si><t>x</t></si>" * 700_000 + b"</sst>")
+    at = app()
+    at.run()
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    at.file_uploader[0].upload("bomb.xlsx", buffer.getvalue(), mime).run()
+    assert at.selectbox(key="w.sheet").options == ["Detect"]
+    at.button(key="w.load").click().run()
+    assert not at.exception
+    assert (
+        at.error[0].value
+        == "bomb.xlsx unpacks to 11.3 MB; the limit is 10 MB unpacked (10 times the upload limit)."
+    )
+
+
 def test_legacy_xls_is_rejected_in_place(
     app: Callable[[], AppTest], fixture_bytes: Callable[[str], bytes]
 ) -> None:
@@ -100,4 +150,4 @@ def test_row_limit_from_the_environment(app: Callable[[], AppTest], monkeypatch:
     at.run()
     at.radio(key="w.source").set_value("Use a sample dataset").run()
     at.button(key="w.load").click().run()
-    assert at.error[0].value == "retail_orders.csv has 6,060 rows; the limit is 100 rows."
+    assert at.error[0].value == "retail_orders.csv has more than 100 rows; the limit is 100 rows."

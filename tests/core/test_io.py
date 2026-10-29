@@ -267,6 +267,70 @@ def test_limits_raise_with_the_limit_in_the_message(tight_limits: Any) -> None:
         assert caught.value.code == code and text in caught.value.message
 
 
+@pytest.fixture
+def parsed_rows(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The row count of every finished ``pd.read_csv`` call; a call that fails is not recorded."""
+    rows: list[int] = []
+    real = pd.read_csv
+
+    def spy(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        frame = real(*args, **kwargs)
+        rows.append(len(frame))
+        return frame
+
+    monkeypatch.setattr(pd, "read_csv", spy)
+    return rows
+
+
+def test_csv_with_too_many_columns_is_refused_before_the_parse(
+    tight_limits: Any, parsed_rows: list[int]
+) -> None:
+    wide = dataclasses.replace(tight_limits, max_bytes=MiB)
+    data = ",".join(["a"] * 300_000).encode() + b"\n1\n"
+    with pytest.raises(LoadError) as caught:
+        load_table(data, "wide.csv", limits=wide)
+    assert caught.value.code == "too_many_columns"
+    assert caught.value.message == "wide.csv has 300,000 columns; the limit is 5 columns."
+    assert parsed_rows == []
+    assert load_table(b"a,b,c,d,e\n1,2,3,4,5\n", "five.csv", limits=wide)[0].shape == (1, 5)
+    assert parsed_rows == [2]
+
+
+def test_a_header_cut_by_the_detection_sample_is_still_refused_before_the_parse(
+    tight_limits: Any, parsed_rows: list[int]
+) -> None:
+    wide = dataclasses.replace(tight_limits, max_bytes=4 * MiB)
+    data = ",".join(["a"] * 700_000).encode() + b"\n"  # 1.4 MB, longer than the first MiB that is read
+    with pytest.raises(LoadError) as caught:
+        load_table(data, "wide.csv", limits=wide)
+    assert caught.value.code == "too_many_columns" and "has at least " in caught.value.message
+    assert caught.value.message.endswith("columns; the limit is 5 columns.")
+    assert parsed_rows == []
+
+
+def test_csv_with_too_many_rows_stops_one_row_past_the_limit(
+    tight_limits: Any, parsed_rows: list[int]
+) -> None:
+    ok = b"a\n" + b"1\n" * 50
+    assert len(load_table(ok, "ok.csv", limits=tight_limits)[0]) == 50
+    assert parsed_rows == [51]  # the header and 50 rows
+    parsed_rows.clear()
+    data = b"a\n" + b"1\n" * 900  # 1,800 bytes: the whole file would be 900 rows
+    with pytest.raises(LoadError) as caught:
+        load_table(data, "long.csv", limits=tight_limits)
+    assert caught.value.code == "too_many_rows"
+    assert caught.value.message == "long.csv has more than 50 rows; the limit is 50 rows."
+    assert parsed_rows == [52]  # the header, 50 rows and the one that shows the limit is passed
+    with pytest.raises(LoadError, match="more than 50 rows"):
+        load_table(b"a\n" + b"1\n" * 51, "one_too_many.csv", limits=tight_limits)
+
+
+def test_a_header_after_title_rows_counts_its_own_fields(tight_limits: Any) -> None:
+    wide = dataclasses.replace(tight_limits, max_bytes=MiB)
+    title = b"Report,,,,,,,,,,\n"  # 11 fields in a row that is not the header
+    assert load_table(title + b"a,b\n1,2\n", "t.csv", LoadOptions(header_row=1), wide)[0].shape == (1, 2)
+
+
 def test_a_byte_order_mark_left_in_the_text_is_dropped() -> None:
     df, report = load_table(b"\xef\xbb\xbfa,b\n1,2\n", "bom.csv", LoadOptions(encoding="utf-8"))
     assert list(df.columns) == ["a", "b"] and report.renamed_columns == ()
@@ -312,6 +376,80 @@ def test_xlsx_column_limit_uses_the_cells_that_are_filled(tight_limits: Any) -> 
     )
     df, _ = load_table(inflated, "five.xlsx", limits=tight_limits)
     assert df.shape == (1, 5)
+
+
+SHARED_STRINGS = "xl/sharedStrings.xml"
+
+
+def with_shared_strings(data: bytes, megabytes: int) -> bytes:
+    """The workbook plus a shared-strings part that unpacks to ``megabytes`` MiB and deflates to a few KiB."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for item in source.infolist():
+            target.writestr(item, source.read(item.filename))
+        entry = b"<si><t>x</t></si>"
+        body = b"<sst>" + entry * (megabytes * MiB // len(entry)) + b"</sst>"
+        target.writestr(SHARED_STRINGS, body)
+    return out.getvalue()
+
+
+def test_workbook_declaring_a_huge_part_is_refused_before_openpyxl_reads_it(
+    tight_limits: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits = dataclasses.replace(tight_limits, max_bytes=MiB)  # 10 MB once unpacked
+    bomb = with_shared_strings(make_xlsx([["a", "b"], [1, 2]]), 12)
+    assert len(bomb) < MiB // 4  # a few KiB of Deflate stand for 12 MB
+
+    def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("openpyxl was asked to open the workbook")
+
+    monkeypatch.setattr(dio, "load_workbook", never)
+    calls = {
+        "load_table": lambda: load_table(bomb, "bomb.xlsx", limits=limits),
+        "list_sheets": lambda: list_sheets(bomb, "bomb.xlsx", limits),
+        "detect_sheet": lambda: detect_sheet(bomb, limits),
+    }
+    for label, call in calls.items():
+        started = time.perf_counter()
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert caught.value.code == "too_large", label
+        assert time.perf_counter() - started < 5.0, label  # generous: the work is reading a zip directory
+    with pytest.raises(LoadError) as caught:
+        load_table(bomb, "bomb.xlsx", limits=limits)
+    assert caught.value.message == (
+        "bomb.xlsx unpacks to 12.0 MB; the limit is 10 MB unpacked (10 times the upload limit)."
+    )
+    assert str(caught.value) == caught.value.message
+
+
+def test_unpacked_size_cap_is_ten_times_the_upload_limit(tight_limits: Any) -> None:
+    data = make_xlsx([["a", "b"], [1, 2]])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        declared = sum(item.file_size for item in archive.infolist())
+    enough = dataclasses.replace(
+        tight_limits, max_bytes=-(-declared // 10)
+    )  # the smallest limit that allows it
+    assert enough.max_bytes * 10 >= declared
+    assert list_sheets(data, "fits.xlsx", enough) == ("Sheet",)
+    assert detect_sheet(data, enough) == "Sheet"
+    short = dataclasses.replace(enough, max_bytes=enough.max_bytes - 1)
+    assert short.max_bytes * 10 < declared
+    with pytest.raises(LoadError) as caught:
+        list_sheets(data, "short.xlsx", short)
+    assert caught.value.code == "too_large" and "short.xlsx unpacks to" in caught.value.message
+
+
+def test_a_normal_workbook_still_loads_under_the_default_limits(fixture_bytes: Read) -> None:
+    data = fixture_bytes("header_offset_two_sheets.xlsx")
+    assert list_sheets(data) == ("Summary", "Data")
+    assert load_table(data, "offset.xlsx")[1].n_rows == 30
+    with pytest.raises(LoadError) as caught:
+        list_sheets(fixture_bytes("not_a_table.bin"), "not_a_table.xlsx")
+    assert caught.value.code == "parse_failed"
 
 
 def test_damaged_xlsx_parts_are_load_errors() -> None:
