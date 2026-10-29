@@ -115,3 +115,16 @@ def test_samples_report_a_folder_that_cannot_be_created(tmp_path: Path) -> None:
     assert "Traceback" not in result.output and result.exception is not None
     assert isinstance(result.exception, SystemExit)
     assert blocker.read_text(encoding="utf-8") == "x"
+
+
+def test_samples_report_an_unreadable_existing_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(self: Path) -> None:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    result = CliRunner().invoke(cli.main, ["samples", "--out", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "Error: Could not write the samples: " in result.output and "Permission denied" in result.output
+    assert "Traceback" not in result.output and isinstance(result.exception, SystemExit)

@@ -66,7 +66,11 @@ cells[4].metric(
 st.caption(" · ".join(f"{count} {kind}" for kind, count in profile.kinds.items() if count))
 
 st.subheader("Columns")
-st.dataframe(column_table(profile.columns), hide_index=True)
+st.dataframe(
+    column_table(profile.columns),
+    hide_index=True,
+    column_config={"Missing %": st.column_config.NumberColumn(format="%.1f %%")},
+)
 
 st.subheader("Preview")
 st.dataframe(df.head(PREVIEW_ROWS))

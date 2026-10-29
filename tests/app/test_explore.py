@@ -115,9 +115,26 @@ def test_switching_the_column_reseeds_the_number_inputs(
     at.selectbox(key="w.f.column").set_value("revenue_eur").run()
     assert at.number_input(key="w.f.value").value == df["revenue_eur"].min()
     assert at.number_input(key="w.f.value2").value == df["revenue_eur"].max()
+    # the browser takes the new value only when the server marks it as set
+    assert at.number_input(key="w.f.value").proto.set_value is True
+    assert at.number_input(key="w.f.value2").proto.set_value is True
     at.button(key="w.f.add").click().run()
     low, high = df["revenue_eur"].min(), df["revenue_eur"].max()
     assert at.session_state["de.filter"].conditions == (Condition("revenue_eur", Op.BETWEEN, (low, high)),)
+
+
+def test_switching_the_column_reseeds_the_text_input(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = goto(loaded("retail_orders"), "4_Explore")
+    at.selectbox(key="w.f.column").set_value("store").run()
+    at.selectbox(key="w.f.op").set_value(Op.CONTAINS).run()
+    at.text_input(key="w.f.text").set_value("Mil").run()
+    assert at.text_input(key="w.f.text").value == "Mil"
+    at.selectbox(key="w.f.column").set_value("payment").run()
+    assert not at.exception, at.exception
+    assert at.text_input(key="w.f.text").value == ""
+    assert at.text_input(key="w.f.text").proto.set_value is True
 
 
 def test_switching_the_operator_reseeds_the_number_inputs(

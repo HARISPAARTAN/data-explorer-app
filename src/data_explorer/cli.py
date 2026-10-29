@@ -92,9 +92,9 @@ def run(ctx: click.Context, host: str, port: int, dry_run: bool) -> None:
 )
 def samples(out: Path) -> None:
     """Copy the three sample datasets into a folder."""
-    if out.exists() and (not out.is_dir() or any(out.iterdir())):
-        raise click.ClickException(f"{out} is not an empty folder.")
     try:
+        if out.exists() and (not out.is_dir() or any(out.iterdir())):
+            raise click.ClickException(f"{out} is not an empty folder.")
         out.mkdir(parents=True, exist_ok=True)
         for name in SAMPLE_FILES:
             shutil.copyfile(SAMPLES_DIR / name, out / name)

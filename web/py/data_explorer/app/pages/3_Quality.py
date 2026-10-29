@@ -59,7 +59,11 @@ else:
     table = quality.missing.rename(
         columns={"column": "Column", "missing": "Missing", "missing_pct": "Missing %"}
     )
-    st.dataframe(table.round({"Missing %": 1}), hide_index=True)
+    st.dataframe(
+        table.round({"Missing %": 1}),
+        hide_index=True,
+        column_config={"Missing %": st.column_config.NumberColumn(format="%.1f %%")},
+    )
 
 st.subheader("Duplicates")
 st.multiselect("Compare on columns (empty = all columns)", columns, key="w.q.subset", on_change=save_subset)
@@ -105,7 +109,11 @@ if quality.outliers:
             for item in quality.outliers
         ]
     )
-    st.dataframe(summary, hide_index=True)
+    st.dataframe(
+        summary,
+        hide_index=True,
+        column_config={"Share %": st.column_config.NumberColumn(format="%.1f %%")},
+    )
 else:
     st.info("No numeric column has at least 4 values and an IQR above 0.")
 if quality.zero_iqr:
