@@ -2,7 +2,7 @@
 
 All notable changes to this project are listed here.
 
-## Unreleased
+## v0.1.0 (2026-10-29)
 
 - Streamlit app with six pages: Upload, Overview, Quality, Explore, Visualise and Download.
 - Pure `core/` package: reading CSV and Excel files with detection of encoding, delimiter, decimal separator, sheet and header row; column profiles; missing values, duplicates, constant columns and IQR outliers; a flat filter grammar whose text form reads back to the same filter; Altair charts; CSV, JSON and Markdown downloads.
