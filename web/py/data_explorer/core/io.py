@@ -46,7 +46,9 @@ XLSX_CONTENT_TYPES = "[Content_Types].xml"  # lists every part; openpyxl finds t
 XLSX_CONTENT_TYPES_BYTES = MiB  # a real one is a few KiB
 XLSX_SHARED_STRINGS = "xl/sharedStrings.xml"  # the usual name; the content types decide which part counts
 XLSX_SHARED_STRINGS_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
-XLSX_STYLES = "xl/styles.xml"  # parsed whole on open; it may declare at most half the upload limit
+XLSX_WORKSHEETS = "xl/worksheets/"  # the sheet parts are streamed, so they are the one place left uncapped
+XLSX_WORKSHEET_RELS = "xl/worksheets/_rels/"  # but openpyxl parses each sheet's relationships whole
+XLSX_WORKSHEET_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
 DATE_SHARE_PERCENT = 95
 DATE_LIKE_PERCENT = 50
 ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
@@ -388,50 +390,61 @@ def detect_header_row(rows: Sequence[Sequence[object]]) -> int:
     return 0
 
 
-def _check_part_size(
-    items: Sequence[zipfile.ZipInfo], names: Collection[str], file_name: str, cap: int, note: str
-) -> None:
-    """Refuse a workbook in which a member called one of ``names`` declares more than ``cap`` bytes."""
-    for item in items:
-        if item.filename in names and item.file_size > cap:
-            raise LoadError(
-                "too_large",
-                f"{file_name} has {item.filename} unpacking to {_size_text(item.file_size)}; "
-                f"the limit is {_size_text(cap)} unpacked for that part{note}.",
-            )
+def _check_part_size(item: zipfile.ZipInfo, file_name: str, cap: int, note: str) -> None:
+    """Refuse a workbook in which the member ``item`` declares more than ``cap`` bytes."""
+    if item.file_size > cap:
+        raise LoadError(
+            "too_large",
+            f"{file_name} has {item.filename} unpacking to {_size_text(item.file_size)}; "
+            f"the limit is {_size_text(cap)} unpacked for that part{note}.",
+        )
 
 
-def _shared_strings_parts(archive: zipfile.ZipFile) -> frozenset[str]:
-    """The members openpyxl may read as the shared strings, found through the content types.
+def _registered_parts(archive: zipfile.ZipFile) -> tuple[frozenset[str], frozenset[str]]:
+    """The members the content types register as shared strings, and those registered as anything else.
 
     openpyxl does not look for ``xl/sharedStrings.xml``: it takes the ``PartName`` of the ``Override`` in
     ``[Content_Types].xml`` whose ``ContentType`` is the shared-strings type, and reads no shared strings when
-    there is none. Every such entry counts here, at any depth and in any namespace, so that no registration
-    can hide a part; when the content types register none, the usual name stands in. openpyxl drops the first
+    there is none. It finds the workbook part the same way, so a part can be renamed and still be parsed.
+    Every such entry counts here, at any depth and in any namespace, so that no registration can hide a part;
+    when the content types register no shared strings, the usual name stands in. openpyxl drops the first
     character of a part name (the ``/``); both that and the name without any leading ``/`` are listed.
     """
     root: ET.Element = ET.fromstring(archive.read(XLSX_CONTENT_TYPES))
-    names: set[str] = set()
+    shared: set[str] = set()
+    other: set[str] = set()
     for element in root.iter():
         part: str | None = element.get("PartName")
-        if (
-            element.tag.rpartition("}")[2] == "Override"
-            and element.get("ContentType") == XLSX_SHARED_STRINGS_TYPE
-            and part
-        ):
-            names.update((part[1:], part.lstrip("/")))
-    return frozenset(names) or frozenset((XLSX_SHARED_STRINGS,))
+        kind: str | None = element.get("ContentType")
+        if element.tag.rpartition("}")[2] != "Override" or not part or kind is None:
+            continue
+        if kind == XLSX_SHARED_STRINGS_TYPE:
+            shared.update((part[1:], part.lstrip("/")))
+        elif kind != XLSX_WORKSHEET_TYPE:
+            other.update((part[1:], part.lstrip("/")))
+    return frozenset(shared) or frozenset((XLSX_SHARED_STRINGS,)), frozenset(other)
+
+
+def _is_worksheet_part(name: str, registered: Collection[str]) -> bool:
+    """A sheet part, which openpyxl streams: under ``xl/worksheets/``, but not a relationships part, and not
+    registered in the content types as anything but a worksheet (a renamed workbook part would hide there)."""
+    return (
+        name.startswith(XLSX_WORKSHEETS)
+        and not name.startswith(XLSX_WORKSHEET_RELS)
+        and name not in registered
+    )
 
 
 def _check_unpacked_size(data: bytes, file_name: str, limits: Limits) -> None:
     """Refuse a workbook that declares too much once unpacked.
 
     The caps are on the sizes in the zip directory (``zipfile`` stops a member at its declared size, so they
-    bound the work). All parts together: at most 10 times the upload limit, checked first. Then the parts
-    openpyxl parses whole on open: ``[Content_Types].xml`` at most 1 MiB, ``xl/styles.xml`` at most half the
-    upload limit, and the shared-strings part, found through the content types, at most the upload limit.
-    Deflate reaches about 1,000:1, so a few hundred KB of the shared strings cost tens of seconds and over a
-    gigabyte.
+    bound the work). All parts together: at most 10 times the upload limit, checked first. Then, part by part,
+    because openpyxl parses every part but the sheets whole on open (the workbook with its defined names, the
+    styles, the theme, the relationships, the properties; external links are not read): ``[Content_Types].xml``
+    at most 1 MiB, the shared-strings part, found through the content types, at most the upload limit, and
+    every other member outside ``xl/worksheets/`` at most half the upload limit. Deflate reaches about
+    1,000:1, so a few hundred KB of declared content cost tens of seconds and gigabytes.
     """
     cap: int = XLSX_EXPANSION * limits.max_bytes
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -443,18 +456,23 @@ def _check_unpacked_size(data: bytes, file_name: str, limits: Limits) -> None:
                 f"{file_name} unpacks to {_size_text(declared)}; the limit is {_size_text(cap)} unpacked "
                 f"({XLSX_EXPANSION} times the upload limit).",
             )
-        _check_part_size(items, (XLSX_CONTENT_TYPES,), file_name, XLSX_CONTENT_TYPES_BYTES, "")
-        _check_part_size(items, (XLSX_STYLES,), file_name, limits.max_bytes // 2, " (half the upload limit)")
-        _check_part_size(
-            items, _shared_strings_parts(archive), file_name, limits.max_bytes, " (the upload limit)"
-        )
+        for item in items:
+            if item.filename == XLSX_CONTENT_TYPES:
+                _check_part_size(item, file_name, XLSX_CONTENT_TYPES_BYTES, "")
+        shared, other = _registered_parts(archive)
+    half: int = limits.max_bytes // 2
+    for item in items:
+        if item.filename in shared:
+            _check_part_size(item, file_name, limits.max_bytes, " (the upload limit)")
+        elif not _is_worksheet_part(item.filename, other):
+            _check_part_size(item, file_name, half, " (half the upload limit)")
 
 
 def _open_workbook(data: bytes, file_name: str, limits: Limits | None = None) -> Any:
     active = limits if limits is not None else current_limits()
     try:
         _check_unpacked_size(data, file_name, active)
-        return load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        return load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
     except LoadError:
         raise
     except Exception as exc:  # openpyxl leaks zipfile, zlib, XML and index errors from damaged files
@@ -910,7 +928,12 @@ def _assemble(file_name: str, table: _Table) -> tuple[pd.DataFrame, list[tuple[s
 def load_table(
     data: bytes, file_name: str, options: LoadOptions = DEFAULT_OPTIONS, limits: Limits | None = None
 ) -> tuple[pd.DataFrame, LoadReport]:
-    """Load CSV or XLSX bytes. Checks run in the order empty, size, type, decode, parse, shape."""
+    """Load CSV or XLSX bytes. Checks run in the order empty, size, type, decode, parse, shape.
+
+    Two checks that are cheap compared with what they prevent run before the parse itself: a CSV header
+    wider than ``max_cols`` fields, and the sizes an XLSX declares in its zip directory (see
+    ``_check_unpacked_size``). Both refuse a small upload whose reading would cost far more than its size.
+    """
     started = time.perf_counter()
     active = limits if limits is not None else current_limits()
     if len(data) == 0:
