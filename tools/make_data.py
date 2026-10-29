@@ -17,6 +17,7 @@ import csv
 import datetime as dt
 import io
 import math
+import re
 import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -30,6 +31,7 @@ SAMPLES_DIR = ROOT / "src" / "data_explorer" / "samples"
 FIXTURES_DIR = ROOT / "fixtures"
 FIXED_TIME = dt.datetime(2026, 10, 29, 0, 0, 0)
 ZIP_TIME = (2026, 10, 29, 0, 0, 0)
+MODIFIED_XML = re.compile(r"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)")
 
 STORES = ("Milan", "Bergamo", "Brescia", "Como", "Monza", "Pavia", "Varese", "Lecco")
 STORE_WEIGHTS = (0.22, 0.14, 0.13, 0.11, 0.12, 0.09, 0.10, 0.09)
@@ -147,8 +149,20 @@ def _decimal_comma(value: float) -> str:
     return f"{value:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
+def _pin_modified(core_xml: bytes) -> bytes:
+    """Set dcterms:modified in docProps/core.xml to FIXED_TIME (openpyxl stamps the save time there)."""
+    stamp = FIXED_TIME.strftime("%Y-%m-%dT%H:%M:%SZ")
+    pinned, count = MODIFIED_XML.subn(rf"\g<1>{stamp}\g<2>", core_xml.decode("utf-8"))
+    assert count == 1, "docProps/core.xml has no dcterms:modified element"
+    return pinned.encode("utf-8")
+
+
 def _normalise_zip(data: bytes) -> bytes:
-    """Rewrite an XLSX container with fixed entry times so regenerating it does not churn."""
+    """Rewrite an XLSX container so two builds are byte-identical.
+
+    Every entry gets the fixed ZIP_TIME, and docProps/core.xml gets dcterms:modified set to
+    FIXED_TIME (openpyxl overwrites it with the save time). All other entries keep their bytes.
+    """
     source = zipfile.ZipFile(io.BytesIO(data))
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as target:
@@ -156,7 +170,10 @@ def _normalise_zip(data: bytes) -> bytes:
             fixed = zipfile.ZipInfo(info.filename, date_time=ZIP_TIME)
             fixed.compress_type = zipfile.ZIP_DEFLATED
             fixed.external_attr = info.external_attr
-            target.writestr(fixed, source.read(info.filename))
+            content = source.read(info.filename)
+            if info.filename == "docProps/core.xml":
+                content = _pin_modified(content)
+            target.writestr(fixed, content)
     return out.getvalue()
 
 

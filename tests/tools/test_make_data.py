@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import csv
+import datetime as dt
+import time
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from openpyxl import load_workbook
 
 SAMPLE_FILES = ("retail_orders.csv", "sensor_readings.csv", "client_survey.xlsx")
+SAMPLES = Path("src") / "data_explorer" / "samples"
+WORKBOOKS = (SAMPLES / "client_survey.xlsx", Path("fixtures") / "header_offset_two_sheets.xlsx")
 
 
 @pytest.fixture(scope="module")
@@ -77,3 +84,86 @@ def test_cli_writes_into_given_folders(make_data: ModuleType, tmp_path: Path) ->
     assert code == 0
     assert sorted(path.name for path in (tmp_path / "s").iterdir()) == sorted(SAMPLE_FILES)
     assert len(list((tmp_path / "f").iterdir())) == 16
+
+
+def _csv_rows(path: Path, encoding: str, delimiter: str) -> list[dict[str, str]]:
+    with path.open(encoding=encoding, newline="") as handle:
+        return list(csv.DictReader(handle, delimiter=delimiter))
+
+
+def test_retail_planted_defects(repo_root: Path) -> None:
+    rows = _csv_rows(repo_root / SAMPLES / "retail_orders.csv", "utf-8-sig", ";")
+    assert len(rows) == 6_060
+    ids = [row["order_id"] for row in rows]
+    repeats = {i for i in range(1, len(rows)) if rows[i] == rows[i - 1]}
+    assert len(repeats) == 60
+    assert all(ids[i] == ids[i - 1] for i in repeats)
+    assert len(set(ids)) == 6_000
+    assert max(Counter(ids).values()) == 2
+    deduped = [row for i, row in enumerate(rows) if i not in repeats]
+    assert len(deduped) == 6_000 and len({row["order_id"] for row in deduped}) == 6_000
+    assert sum(1 for row in rows if row["discount_pct"] == "") == 180
+    units = [int(row["units"]) for row in rows]
+    assert sum(1 for value in units if 120 <= value <= 400) == 15
+    assert all(1 <= value <= 12 or 120 <= value <= 400 for value in units)
+    assert sum(1 for value in units if 1 <= value <= 12) == 6_060 - 15
+    assert {row["country"] for row in rows} == {"IT"}
+
+
+def test_sensor_planted_defects(repo_root: Path) -> None:
+    rows = _csv_rows(repo_root / SAMPLES / "sensor_readings.csv", "cp1252", ",")
+    assert len(rows) == 8_640
+    assert {row["firmware"] for row in rows} == {"2.4.1"}
+    window = [dt.datetime(2025, 3, 21, 6, 0) + dt.timedelta(hours=hour) for hour in range(48)]
+    stamps = {stamp.strftime("%Y-%m-%d %H:%M") for stamp in window}
+    assert len(stamps) == 48
+    inside = [row for row in rows if row["sensor_id"] == "MX-4" and row["timestamp"] in stamps]
+    assert [row["timestamp"] for row in inside] == [stamp.strftime("%Y-%m-%d %H:%M") for stamp in window]
+    for column in ("temperature_c", "humidity_pct", "co2_ppm"):
+        assert all(row[column] == "" for row in inside), column
+    assert sum(1 for row in rows if row["temperature_c"] == "") == 48
+    assert sum(1 for row in rows if row["co2_ppm"] == "") == 48
+    assert sum(1 for row in rows if row["humidity_pct"] == "") == 78
+    spikes = [row for row in rows if row["co2_ppm"] == "9999"]
+    assert len(spikes) == 12
+    assert not any(row["sensor_id"] == "MX-4" and row["timestamp"] in stamps for row in spikes)
+
+
+def test_survey_planted_defects(make_data: ModuleType, repo_root: Path) -> None:
+    sheets = make_data.cell_values((repo_root / SAMPLES / "client_survey.xlsx").read_bytes())
+    assert list(sheets) == ["Responses", "Notes"]
+    header = list(sheets["Responses"][3])
+    assert header[:2] == ["response_id", "submitted_at"] and header[-1] == "survey_wave"
+    records = [
+        dict(zip(header, row, strict=True))
+        for row in sheets["Responses"][4:]
+        if any(value is not None for value in row)
+    ]
+    assert len(records) == 1_224
+    assert sum(1 for i in range(1, len(records)) if records[i] == records[i - 1]) == 24
+    assert sum(1 for record in records if record["satisfaction"] is None) == 37
+    assert sum(1 for record in records if record["comment"] is None) == 840
+    seconds = [record["response_time_s"] for record in records]
+    assert all(isinstance(value, int) for value in seconds)
+    assert sum(1 for value in seconds if 20_001 <= value <= 90_000) == 10
+    assert sum(1 for value in seconds if 60 <= value <= 1_800) == 1_224 - 10
+    assert {record["survey_wave"] for record in records} == {2025}
+    notes = sheets["Notes"]
+    assert notes[0] == ("question", "text") and len(notes) == 1 + 6
+
+
+@pytest.mark.parametrize("relative", WORKBOOKS, ids=lambda path: path.name)
+def test_workbooks_carry_the_fixed_time(repo_root: Path, relative: Path) -> None:
+    workbook = load_workbook(repo_root / relative, read_only=True)
+    try:
+        properties = workbook.properties
+        assert properties.created == properties.modified == dt.datetime(2026, 10, 29)
+    finally:
+        workbook.close()
+
+
+def test_two_builds_are_byte_identical(make_data: ModuleType) -> None:
+    first = (make_data.build_samples(), make_data.build_fixture_files())
+    time.sleep(1.1)  # openpyxl stamps whole seconds; a later build must still match byte for byte
+    second = (make_data.build_samples(), make_data.build_fixture_files())
+    assert first == second
