@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out portfolio-kit at the vendored tag
+        uses: actions/checkout@v7
+        with:
+          repository: HARISPAARTAN/portfolio-kit
+          ref: v0.1.0
+          path: .kit-src
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - name: web/py matches src
+        run: uv run python tools/sync_web.py --check
+      - name: web/kit matches the kit tag
+        run: uv run python tools/sync_kit.py --check --kit-dir .kit-src/dist
+      - name: Scrub
+        run: uv run python tools/checks/scrub.py
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --python ${{ matrix.python }}
+      - run: uv run pytest -q
+
+  core-py314:
+    # The browser demo runs core/ on Pyodide 314, which is CPython 3.14.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+          python-version: "3.14"
+      - run: uv sync --locked --python 3.14
+      - run: uv run --python 3.14 pytest tests/core -q
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t data-explorer-app:ci .
+      - name: Run the image and check its health
+        run: |
+          set -eu
+          docker run -d --name data-explorer -p 8501:8501 data-explorer-app:ci
+          healthy=0
+          for i in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8501/_stcore/health)" = "200" ]; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          test "$healthy" = 1
+          curl -fsS http://127.0.0.1:8501/_stcore/health
+          echo
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8501/)" = "200"
+          test "$(docker exec data-explorer id -u)" = "10001"
+      - name: Container logs
+        if: always()
+        run: docker logs data-explorer || true
+      - name: Remove the container
+        if: always()
+        run: docker rm -f data-explorer || true
+
+  stlite-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Contrast, own-file weight and links
+        run: |
+          node tools/checks/contrast.mjs
+          node tools/checks/page-weight.mjs
+          OFFLINE=1 node tools/checks/verify-site.mjs
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.64.1
+          npx playwright install --with-deps chromium
+      - name: Smoke test of web/ served locally
+        env:
+          OUT: ${{ runner.temp }}/smoke
+        run: |
+          python3 -m http.server 8000 --bind 127.0.0.1 -d web > "$RUNNER_TEMP/http-server.log" 2>&1 &
+          curl -fsS --retry 20 --retry-delay 1 --retry-connrefused -o /dev/null http://127.0.0.1:8000/
+          node tools/checks/stlite_smoke.mjs
+          WEIGHTS="$OUT/weights.json" node tools/checks/page-weight.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stlite-smoke
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: warn
+          retention-days: 14

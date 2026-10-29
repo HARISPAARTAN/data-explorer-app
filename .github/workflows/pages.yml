@@ -1,0 +1,70 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: web/py matches src
+        run: python3 tools/sync_web.py --check
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  smoke:
+    # The same smoke test as in CI, against the deployed page.
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.64.1
+          npx playwright install --with-deps chromium
+      - name: Smoke test of the live page
+        env:
+          URL: ${{ needs.deploy.outputs.page_url }}
+          OUT: ${{ runner.temp }}/smoke-live
+        run: |
+          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors -o /dev/null "$URL"
+          node tools/checks/stlite_smoke.mjs
+          WEIGHTS="$OUT/weights.json" node tools/checks/page-weight.mjs
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: stlite-smoke-live
+          path: ${{ runner.temp }}/smoke-live
+          if-no-files-found: warn
+          retention-days: 14
