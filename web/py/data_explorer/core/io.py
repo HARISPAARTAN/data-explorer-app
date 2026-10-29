@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+import zipfile
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ DECIMAL_SCAN_ROWS = 200
 SHEET_SCAN_ROWS = 200
 MAX_HEADER_ROW = 19
 XLSX_MAX_ROWS = 1_048_576  # the row limit of Excel itself; a <row r=...> beyond it is not a real sheet
+XLSX_EXPANSION = 10  # a workbook may declare at most this many times the upload limit once unpacked
 DATE_SHARE_PERCENT = 95
 DATE_LIKE_PERCENT = 50
 ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
@@ -89,8 +91,8 @@ COMMA_DECIMAL = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d+|-?\d+,\d+")
 LOOKS_NUMERIC = re.compile(r"[-+]?(?:\d+(?:[.,]\d+)*|\d*[.,]\d+)(?:[eE][-+]?\d+)?")
 INT_POINT = re.compile(r"-?\d+")
 FLOAT_POINT = re.compile(r"-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
-INT_COMMA = re.compile(r"-?\d{1,3}(?:\.\d{3})+|-?\d+")
-FLOAT_COMMA = re.compile(r"-?(?:\d{1,3}(?:\.\d{3})+|\d+),\d+")
+INT_COMMA = re.compile(r"-?[1-9]\d{0,2}(?:\.\d{3})+|-?\d+")  # the first group of thousands starts with 1-9
+FLOAT_COMMA = re.compile(r"-?(?:[1-9]\d{0,2}(?:\.\d{3})+|\d+),\d+")
 LEADING_ZERO = re.compile(r"-?0\d")
 MAX_INT_DIGITS = 15
 DATE_HINT = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
@@ -380,9 +382,31 @@ def detect_header_row(rows: Sequence[Sequence[object]]) -> int:
     return 0
 
 
-def _open_workbook(data: bytes, file_name: str) -> Any:
+def _check_unpacked_size(data: bytes, file_name: str, limits: Limits) -> None:
+    """Refuse a workbook whose parts declare more than 10 times the upload limit once unpacked.
+
+    openpyxl parses ``xl/sharedStrings.xml`` completely on open, and Deflate reaches about 1,000:1, so a few
+    hundred KB can cost gigabytes. The sizes come from the zip directory; ``zipfile`` stops a member at its
+    declared size, so the declared total bounds the work.
+    """
+    cap = XLSX_EXPANSION * limits.max_bytes
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        declared = sum(item.file_size for item in archive.infolist())
+    if declared > cap:
+        raise LoadError(
+            "too_large",
+            f"{file_name} unpacks to {_size_text(declared)}; the limit is {_size_text(cap)} unpacked "
+            f"({XLSX_EXPANSION} times the upload limit).",
+        )
+
+
+def _open_workbook(data: bytes, file_name: str, limits: Limits | None = None) -> Any:
+    active = limits if limits is not None else current_limits()
     try:
+        _check_unpacked_size(data, file_name, active)
         return load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except LoadError:
+        raise
     except Exception as exc:  # openpyxl leaks zipfile, zlib, XML and index errors from damaged files
         raise LoadError("parse_failed", f"{file_name} could not be read as an Excel workbook.") from exc
 
@@ -410,17 +434,19 @@ def _pick_sheet(workbook: Any, file_name: str = "the workbook") -> str:
     return best
 
 
-def list_sheets(data: bytes, file_name: str = "the workbook") -> tuple[str, ...]:
-    workbook = _open_workbook(data, file_name)
+def list_sheets(
+    data: bytes, file_name: str = "the workbook", limits: Limits | None = None
+) -> tuple[str, ...]:
+    workbook = _open_workbook(data, file_name, limits)
     try:
         return _sheet_titles(workbook)
     finally:
         workbook.close()
 
 
-def detect_sheet(data: bytes) -> str:
+def detect_sheet(data: bytes, limits: Limits | None = None) -> str:
     """The sheet with the most non-empty cells in its first 200 rows; ties go to the first sheet."""
-    workbook = _open_workbook(data, "the workbook")
+    workbook = _open_workbook(data, "the workbook", limits)
     try:
         return _pick_sheet(workbook)
     except LoadError:
@@ -625,16 +651,22 @@ def _size_text(size: int) -> str:
     return f"{size:,} bytes"
 
 
+def _too_many_columns(file_name: str, n_cols: int, limits: Limits, *, at_least: bool = False) -> LoadError:
+    found = f"at least {n_cols:,}" if at_least else f"{n_cols:,}"
+    return LoadError(
+        "too_many_columns", f"{file_name} has {found} columns; the limit is {limits.max_cols:,} columns."
+    )
+
+
 def _check_shape(file_name: str, n_rows: int, n_cols: int, limits: Limits) -> None:
+    """The row count may be a lower bound: both readers stop one row past the limit."""
     if n_rows > limits.max_rows:
         raise LoadError(
-            "too_many_rows", f"{file_name} has {n_rows:,} rows; the limit is {limits.max_rows:,} rows."
+            "too_many_rows",
+            f"{file_name} has more than {limits.max_rows:,} rows; the limit is {limits.max_rows:,} rows.",
         )
     if n_cols > limits.max_cols:
-        raise LoadError(
-            "too_many_columns",
-            f"{file_name} has {n_cols:,} columns; the limit is {limits.max_cols:,} columns.",
-        )
+        raise _too_many_columns(file_name, n_cols, limits)
 
 
 def _first_line(exc: Exception) -> str:
@@ -669,6 +701,11 @@ def _load_csv(data: bytes, file_name: str, options: LoadOptions, limits: Limits)
             "parse_failed", f"{file_name} could not be read as a table: {_first_line(exc)}"
         ) from exc
     header_row = options.header_row if options.header_row is not None else detect_header_row(head)
+    if header_row < len(head) and len(head[header_row]) > limits.max_cols:
+        # Refused before the parse: a header of a million fields would cost gigabytes. The sample ends at
+        # DETECT_BYTES, so a header line cut there is only known to have at least this many fields.
+        cut = len(sample) < len(text) and header_row == len(head) - 1
+        raise _too_many_columns(file_name, len(head[header_row]), limits, at_least=cut)
     try:
         frame = pd.read_csv(
             io.StringIO(text),
@@ -679,6 +716,7 @@ def _load_csv(data: bytes, file_name: str, options: LoadOptions, limits: Limits)
             na_filter=False,
             skiprows=header_row,
             skip_blank_lines=True,
+            nrows=limits.max_rows + 2,  # the header and one row past the limit; the parse stops there
             engine="c",
         )
     except pd.errors.EmptyDataError as exc:
@@ -749,7 +787,7 @@ def _read_xlsx_rows(
 
 
 def _load_xlsx(data: bytes, file_name: str, options: LoadOptions, limits: Limits) -> _Table:
-    workbook = _open_workbook(data, file_name)
+    workbook = _open_workbook(data, file_name, limits)
     try:
         sheets = _sheet_titles(workbook)
         if not sheets:

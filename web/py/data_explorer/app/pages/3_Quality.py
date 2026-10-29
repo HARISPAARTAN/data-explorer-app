@@ -72,7 +72,8 @@ st.markdown(f"{duplicates.duplicate_rows:,} duplicate rows in {duplicates.groups
 if duplicates.duplicate_rows:
     st.dataframe(duplicates.sample_rows)
     st.caption(
-        "Up to 20 rows that take part in a duplication, each group together; the index is the row number."
+        "Up to 20 rows that take part in a duplication, each group together; "
+        "the index is the row position, counted from 0."
     )
 
 st.subheader("Constant columns")
