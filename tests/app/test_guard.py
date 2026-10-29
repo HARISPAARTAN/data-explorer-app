@@ -9,7 +9,7 @@ from streamlit.testing.v1 import AppTest
 
 from data_explorer.app.ui import NO_DATASET
 
-PAGES = ["2_Overview"]
+PAGES = ["2_Overview", "3_Quality", "4_Explore", "5_Visualise", "6_Download"]
 
 
 @pytest.mark.parametrize("page", PAGES)
