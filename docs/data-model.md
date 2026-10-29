@@ -191,13 +191,14 @@ Planted defects:
 | Profile JSON | `schema_version` (1), `generator`, `source` (the load report without its warnings), `warnings`, `shape`, `view` (`filter_text`, `columns`, `sort`, `rows_in_view`, `scope`), `columns` (one profile per column), `quality` (missing values, duplicates, constant columns, outliers with `k`); indented by 2, sorted keys |
 | Profile Markdown | `# Data profile: <file>`, then Source, Shape, View, Columns, Missing values, Duplicates, Constant columns, Outliers, and Warnings when the load gave any |
 
-In both CSV dialects a text cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet shows it instead of evaluating it; numeric columns are never changed. The files are named `<stem>_filtered.csv`, `<stem>_profile.json` and `<stem>_profile.md`, where the stem is the uploaded file's name reduced to letters, digits, `_` and `-` (at most 60 characters, `dataset` if nothing is left). The profiles contain no timestamps, so the same input always gives the same bytes ([ADR 0005](adr/0005-text-only-downloads.md)).
+In both CSV dialects a text cell, and a column name in the header row, that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a spreadsheet shows it instead of evaluating it; the values of numeric columns are never changed. The files are named `<stem>_filtered.csv`, `<stem>_profile.json` and `<stem>_profile.md`, where the stem is the uploaded file's name reduced to letters, digits, `_` and `-` (at most 60 characters, `dataset` if nothing is left). The profiles contain no timestamps, so the same input always gives the same bytes ([ADR 0005](adr/0005-text-only-downloads.md)).
 
 ## Limits
 
 | Limit | Server | Browser |
 |---|---|---|
 | File size, rows, columns | 50 MB, 1,000,000, 500 (lower with environment variables) | 20 MB, 200,000, 200 |
+| Excel files, unpacked: all parts together, the shared-strings part, every other part outside `xl/worksheets/`, `[Content_Types].xml` | 500 MB, 50 MB, 25 MB, 1 MB (10 ×, 1 × and ½ × the upload limit, then fixed) | 200 MB, 20 MB, 10 MB, 1 MB |
 | Filter conditions, sort keys, values offered for `IN` | 10, 3, the 200 most frequent | the same |
 | Rows shown: preview, Explore table, outlier rows, duplicate sample | 100, 1,000, 200, 20 | the same |
 | Charts: bins, bar categories, line series, scatter points, heatmap columns, missing-value blocks × columns | 5 to 100, top 50, 8, 5,000, 20, 100 × 50 | the same |

@@ -235,6 +235,10 @@ def test_decimal_comma_does_not_read_a_zero_point_as_thousands() -> None:
     assert report.decimal == ","
     assert df["x"].tolist() == ["0.125", "0.5"] and df["y"].tolist() == ["0.250", "0.75"]
     assert pd.api.types.is_string_dtype(df["x"]) and pd.api.types.is_string_dtype(df["y"])
+    # Columns in which every value is a three-digit fraction: only the integer pattern could read them.
+    df, _ = load_table(b"x;y\n0.125;0.250\n0.375;0.500\n", "z.csv", options)
+    assert df["x"].tolist() == ["0.125", "0.375"] and df["y"].tolist() == ["0.250", "0.500"]
+    assert pd.api.types.is_string_dtype(df["x"]) and pd.api.types.is_string_dtype(df["y"])
     df, _ = load_table(b"x;y\n-0.125,5;0.125,5\n", "z.csv", options)
     assert df["x"].tolist() == ["-0.125,5"] and df["y"].tolist() == ["0.125,5"]
     df, _ = load_table(
@@ -447,8 +451,9 @@ def test_workbook_declaring_a_huge_part_is_refused_before_openpyxl_reads_it(
 
 
 def test_unpacked_size_cap_is_ten_times_the_upload_limit(tight_limits: Any) -> None:
-    # Padded so that the total, not the 2.6 KB styles part (capped at half the limit), is what the limit meets.
-    data = with_part(make_xlsx([["a", "b"], [1, 2]]), "xl/padding.xml", b" " * 100_000)
+    # Padded under xl/worksheets/ (no part cap applies there) so that the total, not the 10 KB theme part
+    # (capped at half the limit), is what the limit meets.
+    data = with_part(make_xlsx([["a", "b"], [1, 2]]), "xl/worksheets/padding.xml", b" " * 1_000_000)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         declared = sum(item.file_size for item in archive.infolist())
     enough = dataclasses.replace(
@@ -775,12 +780,28 @@ def test_shared_strings_are_read_from_the_part_the_content_types_name(part: str)
     assert detect_sheet(data, SERVER_LIMITS) == "Sheet"
 
 
-def test_a_part_that_the_content_types_do_not_name_is_not_a_shared_strings_part() -> None:
-    # openpyxl never reads xl/sharedStrings.xml here, so its size is only the total cap's business.
+def test_a_part_that_the_content_types_do_not_name_is_an_ordinary_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # openpyxl never reads xl/sharedStrings.xml here, so it gets the cap of any part, not the larger one.
     data = with_registered_shared_strings("xl/strings1.xml", shared_strings_xml("x", "y"))
-    data = with_part(data, "xl/sharedStrings.xml", shared_strings_of_size(60 * MiB))
-    df, _ = load_table(data, "unread.xlsx", limits=SERVER_LIMITS)
+    data = with_part(data, "xl/sharedStrings.xml", shared_strings_of_size(30 * MiB))
+    assert_refused_before_openpyxl(
+        data,
+        SERVER_LIMITS,
+        monkeypatch,
+        "xl/sharedStrings.xml unpacking to 30 MB; the limit is 25 MB unpacked for that part "
+        "(half the upload limit).",
+    )
+
+
+def test_the_registered_shared_strings_part_keeps_the_larger_cap() -> None:
+    body = shared_strings_xml("x", "y").ljust(30 * MiB)  # above half the upload limit, below the limit
+    data = with_registered_shared_strings("xl/strings1.xml", body)
+    df, _ = load_table(data, "named.xlsx", limits=SERVER_LIMITS)
     assert list(df.columns) == ["x", "y"]
+    assert list_sheets(data, "named.xlsx", SERVER_LIMITS) == ("Sheet",)
+    assert detect_sheet(data, SERVER_LIMITS) == "Sheet"
 
 
 @pytest.mark.parametrize("limits", [SERVER_LIMITS, BROWSER_LIMITS], ids=["server", "browser"])
@@ -865,3 +886,188 @@ def test_the_total_cap_is_checked_before_the_part_caps() -> None:
         list_sheets(bomb, "both.xlsx", limits)
     assert caught.value.message.startswith("both.xlsx unpacks to 10.")
     assert caught.value.message.endswith("the limit is 10 MB unpacked (10 times the upload limit).")
+
+
+# --- every other part -----------------------------------------------------------------------
+
+WORKBOOK = "xl/workbook.xml"
+WORKBOOK_RELS = "xl/_rels/workbook.xml.rels"
+SHEET_RELS = "xl/worksheets/_rels/sheet1.xml.rels"
+EXTERNAL_LINK = "xl/externalLinks/externalLink1.xml"
+EXTERNAL_LINK_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"
+EXTERNAL_LINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink"
+RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PART_CAPS = [
+    (SERVER_LIMITS, "25 MB"),
+    (BROWSER_LIMITS, "10 MB"),
+]  # half the upload limit, as the message says
+
+
+def with_workbook_in(data: bytes, part: str) -> bytes:
+    """The workbook with its main part moved to ``part``; the content types and the relationships follow."""
+    folder, _, name = part.rpartition("/")
+    renamed = {WORKBOOK: part, WORKBOOK_RELS: f"{folder}/_rels/{name}.rels"}
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename == CONTENT_TYPES:
+                content = content.replace(f"/{WORKBOOK}".encode(), f"/{part}".encode())
+            target.writestr(renamed.get(item.filename, item.filename), content)
+    return out.getvalue()
+
+
+def with_external_link(data: bytes, body: bytes) -> bytes:
+    """The workbook with ``body`` as an external link that the content types, the workbook relationships and
+    the workbook itself all name, as Excel writes one."""
+    reference = (
+        f'<externalReferences><externalReference xmlns:r="{RELATIONSHIPS_NAMESPACE}" r:id="rId99"/>'
+        "</externalReferences>"
+    ).encode()
+    relationship = (
+        f'<Relationship Id="rId99" Type="{EXTERNAL_LINK_REL}" Target="externalLinks/externalLink1.xml"/>'
+    ).encode()
+    override = f'<Override PartName="/{EXTERNAL_LINK}" ContentType="{EXTERNAL_LINK_TYPE}"/>'.encode()
+    linked = patch_member(data, WORKBOOK, lambda xml: xml.replace(b"</sheets>", b"</sheets>" + reference))
+    linked = patch_member(
+        linked,
+        WORKBOOK_RELS,
+        lambda xml: xml.replace(b"</Relationships>", relationship + b"</Relationships>"),
+    )
+    linked = patch_member(linked, CONTENT_TYPES, lambda xml: xml.replace(b"</Types>", override + b"</Types>"))
+    return with_part(linked, EXTERNAL_LINK, body)
+
+
+def with_sized_part(data: bytes, part: str, size: int) -> bytes:
+    """The workbook with ``part`` padded with trailing spaces to ``size`` bytes (the part is added if absent)."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        present = part in archive.namelist()
+    if present:
+        return patch_member(data, part, lambda xml: xml.ljust(size))
+    return with_part(data, part, b" " * size)
+
+
+@pytest.mark.parametrize(("limits", "limit"), PART_CAPS, ids=["server", "browser"])
+@pytest.mark.parametrize("part", [WORKBOOK, "xl/wb2.xml", "xl/worksheets/wb2.xml"])
+def test_a_huge_workbook_part_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch, limits: dio.Limits, limit: str, part: str
+) -> None:
+    # Defined names, sheets and the rest of the workbook are parsed whole: 480 MiB of definedName entries cost
+    # a minute and 7 GB. The part may be renamed (openpyxl finds it through the content types), also into
+    # xl/worksheets/, where the sheets live.
+    declared = 100 * MiB
+    assert declared <= dio.XLSX_EXPANSION * limits.max_bytes  # only the part cap can refuse it
+    plain = make_xlsx([["a", "b"], [1, 2]])
+    moved = plain if part == WORKBOOK else with_workbook_in(plain, part)
+    assert load_table(moved, "moved.xlsx", limits=limits)[0].shape == (1, 2)  # openpyxl follows the manifest
+    bomb = patch_member(moved, part, lambda xml: xml.ljust(declared))
+    assert len(bomb) < MiB // 4  # a few KiB of Deflate stand for the whole part
+    assert_refused_before_openpyxl(
+        bomb,
+        limits,
+        monkeypatch,
+        f"{part} unpacking to 100 MB; the limit is {limit} unpacked for that part (half the upload limit).",
+    )
+
+
+@pytest.mark.parametrize(("limits", "limit"), PART_CAPS, ids=["server", "browser"])
+def test_a_huge_external_link_part_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch, limits: dio.Limits, limit: str
+) -> None:
+    # Cached external workbooks are parsed whole unless the links are dropped: 100 MiB cost 20 s and 2.3 GB.
+    declared = 100 * MiB
+    assert declared <= dio.XLSX_EXPANSION * limits.max_bytes
+    link = f'<externalLink xmlns="{MAIN_NAMESPACE}"/>'.encode()
+    bomb = with_external_link(make_xlsx([["a", "b"], [1, 2]]), link.ljust(declared))
+    assert len(bomb) < MiB // 4
+    assert_refused_before_openpyxl(
+        bomb,
+        limits,
+        monkeypatch,
+        f"{EXTERNAL_LINK} unpacking to 100 MB; the limit is {limit} unpacked for that part "
+        "(half the upload limit).",
+    )
+
+
+def test_external_links_are_not_opened() -> None:
+    # With the links kept, openpyxl parses this part and fails on it; with them dropped it never looks.
+    data = with_external_link(make_xlsx([["a", "b"], [1, 2]]), b"<externalLink><not closed>")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert EXTERNAL_LINK in archive.namelist() and b"externalReference " in archive.read(WORKBOOK)
+    for limits in (SERVER_LIMITS, BROWSER_LIMITS):
+        df, _ = load_table(data, "linked.xlsx", limits=limits)
+        assert list(df.columns) == ["a", "b"] and df.shape == (1, 2)
+        assert list_sheets(data, "linked.xlsx", limits) == ("Sheet",)
+        assert detect_sheet(data, limits) == "Sheet"
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        WORKBOOK,
+        WORKBOOK_RELS,
+        "xl/theme/theme1.xml",
+        "docProps/core.xml",
+        "docProps/app.xml",
+        "xl/media/image1.png",
+    ],
+)
+def test_any_other_part_may_declare_half_the_upload_limit(tight_limits: Any, part: str) -> None:
+    limits = dataclasses.replace(tight_limits, max_bytes=200_000)  # the total cap, 2,000,000, is far away
+    base = make_xlsx([["a", "b"], [1, 2]])
+    df, _ = load_table(with_sized_part(base, part, 100_000), "limit.xlsx", limits=limits)
+    assert list(df.columns) == ["a", "b"] and df.shape == (1, 2)
+    over = with_sized_part(base, part, 100_001)
+    for call in (
+        lambda: load_table(over, "over.xlsx", limits=limits),
+        lambda: list_sheets(over, "over.xlsx", limits),
+        lambda: detect_sheet(over, limits),
+    ):
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert caught.value.code == "too_large"
+        assert (
+            f"{part} unpacking to 100,001 bytes; the limit is 100,000 bytes unpacked" in caught.value.message
+        )
+        assert caught.value.message.endswith("for that part (half the upload limit).")
+
+
+def test_sheet_parts_are_streamed_so_their_size_is_left_to_the_total(tight_limits: Any) -> None:
+    limits = dataclasses.replace(tight_limits, max_bytes=200_000)  # half is 100,000; the total is 2,000,000
+    base = make_xlsx([["a", "b"], [1, 2]])
+    big_sheet = patch_member(base, SHEET, lambda xml: xml.ljust(150_000))
+    df, report = load_table(big_sheet, "sheet.xlsx", limits=limits)
+    assert list(df.columns) == ["a", "b"] and df.shape == (1, 2) and report.sheets == ("Sheet",)
+    assert list_sheets(big_sheet, "sheet.xlsx", limits) == ("Sheet",)
+    assert detect_sheet(big_sheet, limits) == "Sheet"
+    more = with_part(base, "xl/worksheets/sheet9.xml", b" " * 150_000)
+    assert load_table(more, "more.xlsx", limits=limits)[0].shape == (1, 2)
+    # A sheet's relationships are parsed whole, so they are not left out.
+    rels = b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>'
+    assert load_table(with_part(base, SHEET_RELS, rels.ljust(100_000)), "rels.xlsx", limits=limits)[
+        0
+    ].shape == (
+        1,
+        2,
+    )
+    with pytest.raises(LoadError) as caught:
+        load_table(with_part(base, SHEET_RELS, rels.ljust(100_001)), "rels.xlsx", limits=limits)
+    assert caught.value.message == (
+        f"rels.xlsx has {SHEET_RELS} unpacking to 100,001 bytes; the limit is 100,000 bytes unpacked for that "
+        "part (half the upload limit)."
+    )
+
+
+@pytest.mark.parametrize("limits", [SERVER_LIMITS, BROWSER_LIMITS], ids=["server", "browser"])
+@pytest.mark.parametrize("source", ["generated.xlsx", "header_offset_two_sheets.xlsx"])
+def test_ordinary_workbooks_pass_every_cap(fixture_bytes: Read, limits: dio.Limits, source: str) -> None:
+    if source == "generated.xlsx":
+        data, sheets, chosen, shape = make_xlsx([["a", "b"], [1, 2], [3, 4]]), ("Sheet",), "Sheet", (2, 2)
+    else:
+        data, sheets, chosen, shape = fixture_bytes(source), ("Summary", "Data"), "Data", (30, 4)
+    assert list_sheets(data, source, limits) == sheets
+    assert detect_sheet(data, limits) == chosen
+    assert load_table(data, source, limits=limits)[0].shape == shape
