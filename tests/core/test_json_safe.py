@@ -68,3 +68,11 @@ def test_numpy_strings_become_plain_str() -> None:
 def test_unknown_types_raise() -> None:
     with pytest.raises(TypeError, match="object"):
         json_safe(object())
+
+
+def test_json_object_requires_a_mapping_or_dataclass() -> None:
+    from data_explorer.core import json_object
+
+    assert json_object(Pair(1.0, ())) == {"left": 1.0, "right": []}
+    with pytest.raises(TypeError, match="JSON object"):
+        json_object([1, 2])

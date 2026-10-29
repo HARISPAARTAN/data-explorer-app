@@ -16,7 +16,7 @@ JSONValue: TypeAlias = "None | bool | int | float | str | list[JSONValue] | dict
 
 FLOAT_DECIMALS = 6
 
-__all__ = ["FLOAT_DECIMALS", "JSONValue", "json_safe"]
+__all__ = ["FLOAT_DECIMALS", "JSONValue", "json_object", "json_safe"]
 
 
 def json_safe(value: object) -> JSONValue:
@@ -63,3 +63,11 @@ def json_safe(value: object) -> JSONValue:
             value = pd.Series(value.ravel()).astype(object).to_numpy().reshape(value.shape)
         return [json_safe(item) for item in value.tolist()]
     raise TypeError(f"Cannot convert a {type(value).__name__} object to JSON")
+
+
+def json_object(value: object) -> dict[str, JSONValue]:
+    """``json_safe`` for values that must become a JSON object (dataclasses and mappings)."""
+    result = json_safe(value)
+    if not isinstance(result, dict):
+        raise TypeError(f"Expected a JSON object, got {type(result).__name__}")
+    return result
