@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -42,6 +43,7 @@ BLOCK_END = "# --- end of kit palette ---"
 RAMPS = (("palette", "PALETTE", 8), ("sequential", "SEQUENTIAL", 6), ("diverging", "DIVERGING", 7))
 THEMES = ("dark", "light")
 HEX = re.compile(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])")
+WINDOWS_DEVICE = re.compile(r"con|prn|aux|nul|com[1-9]|lpt[1-9]", re.IGNORECASE)
 
 Palette = dict[str, dict[str, tuple[str, ...]]]
 
@@ -55,19 +57,41 @@ def _sha256(data: bytes) -> str:
 
 
 def _check_relative(name: str) -> None:
+    """Reject a path that could leave the target folder or name something odd on Windows."""
     parts = name.split("/")
-    if not name or name.startswith("/") or "\\" in name or ".." in parts or ":" in parts[0]:
+    unsafe = (
+        not name
+        or "\\" in name
+        or ":" in name
+        or any(ord(char) < 32 for char in name)
+        or any(part in ("", ".", "..") for part in parts)
+        or any(WINDOWS_DEVICE.fullmatch(part.split(".", 1)[0].rstrip(" ")) for part in parts)
+    )
+    if unsafe:
         raise KitError(f"Refusing an unsafe path in the kit archive: {name!r}")
 
 
 def read_archive(kit_repo: Path, tag: str) -> dict[str, bytes]:
     """Return the files under dist/ at ``tag`` as {path relative to dist/: bytes}."""
+    if not tag or tag.startswith("-"):
+        raise KitError(f"Refusing the tag {tag!r}: a tag is empty or starts with '-'.")
     if not (kit_repo / ".git").exists():
         raise KitError(
             f"No git clone of portfolio-kit at {kit_repo}; pass --kit-repo or set PORTFOLIO_KIT_REPO."
         )
     result = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", "-C", str(kit_repo), "archive", "--format=tar", tag, "dist"],
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "-C",
+            str(kit_repo),
+            "archive",
+            "--format=tar",
+            "--",
+            tag,
+            "dist",
+        ],
         capture_output=True,
         check=False,
     )
@@ -76,10 +100,16 @@ def read_archive(kit_repo: Path, tag: str) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
     with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
         for member in archive.getmembers():
-            if not member.isfile():
+            if member.isdir():
                 continue
+            if not member.isfile():
+                raise KitError(f"Refusing {member.name!r} in the kit archive: not a regular file.")
+            _check_relative(member.name)
+            if not member.name.startswith("dist/"):
+                raise KitError(f"Refusing {member.name!r} in the kit archive: it is outside dist/.")
             relative = member.name.removeprefix("dist/")
-            _check_relative(relative)
+            if relative in files:
+                raise KitError(f"Refusing {member.name!r} in the kit archive: it appears twice.")
             extracted = archive.extractfile(member)
             if extracted is None:
                 raise KitError(f"Cannot read {member.name} from the archive.")
@@ -249,19 +279,66 @@ def update_palette(kit_dir: Path = KIT_DIR, charts: Path = CHARTS) -> bool:
     return True
 
 
+def _refuse_foreign_folder(kit_dir: Path) -> None:
+    """Raise unless kit_dir is absent, empty or an earlier kit copy (it has VERSION or MANIFEST.json)."""
+    if not kit_dir.exists() and not kit_dir.is_symlink():
+        return
+    if kit_dir.is_symlink() or not kit_dir.is_dir():
+        raise KitError(f"{kit_dir} is not a folder; refusing to replace it.")
+    if any(kit_dir.iterdir()) and not any((kit_dir / name).is_file() for name in ("VERSION", MANIFEST)):
+        raise KitError(
+            f"{kit_dir} is not an earlier kit copy (no VERSION or {MANIFEST}); refusing to replace it."
+        )
+
+
+def _replace_folder(kit_dir: Path, files: Mapping[str, bytes], tag: str) -> None:
+    """Write the kit into a temporary sibling folder, then swap it in; undo everything on a failure."""
+    kit_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=kit_dir.parent, prefix=".kit-"))
+    aside = staging.with_name(staging.name + ".old")
+    moved = False
+    try:
+        for name, data in files.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        (staging / "VERSION").write_text(f"{tag}\n", encoding="utf-8", newline="\n")
+        if kit_dir.exists():
+            os.replace(kit_dir, aside)
+            moved = True
+        os.replace(staging, kit_dir)
+    except BaseException as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        if moved and not kit_dir.exists():
+            os.replace(aside, kit_dir)
+        if isinstance(exc, OSError):
+            raise KitError(f"Could not replace {kit_dir}, the earlier copy is kept: {exc}") from exc
+        raise
+    if moved:
+        try:
+            shutil.rmtree(aside)
+        except OSError as exc:
+            raise KitError(
+                f"{kit_dir} is updated, but the earlier copy could not be removed: {aside} ({exc})"
+            ) from exc
+
+
 def sync(kit_repo: Path, tag: str, kit_dir: Path = KIT_DIR, charts: Path = CHARTS) -> int:
-    """Replace kit_dir with dist/ at ``tag``; return the number of kit files copied."""
+    """Replace kit_dir with dist/ at ``tag``; return the number of kit files copied.
+
+    Everything that can fail is checked before kit_dir is touched, and kit_dir is swapped in one step.
+    """
     files = read_archive(kit_repo, tag)
     problems = verify(files)
     if problems:
         raise KitError("The kit archive does not match its manifest: " + "; ".join(problems))
-    if kit_dir.exists():
-        shutil.rmtree(kit_dir)
-    for name, data in files.items():
-        target = kit_dir / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    (kit_dir / "VERSION").write_text(f"{tag}\n", encoding="utf-8", newline="\n")
+    if "echarts-theme.js" not in files:
+        raise KitError("The kit archive has no echarts-theme.js.")
+    palette = parse_palette(files["echarts-theme.js"].decode("utf-8"))
+    if charts.exists():
+        replace_block(charts.read_text(encoding="utf-8"), render_block(palette))
+    _refuse_foreign_folder(kit_dir)
+    _replace_folder(kit_dir, files, tag)
     update_palette(kit_dir, charts)
     return len(files)
 

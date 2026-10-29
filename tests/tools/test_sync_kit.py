@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
 import shutil
 import subprocess
+import tarfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -165,7 +168,8 @@ def _git(*args: str, cwd: Path) -> None:
     )
 
 
-def test_sync_copies_the_tag_and_check_passes(sync_kit: ModuleType, tmp_path: Path) -> None:
+def _kit_repo(tmp_path: Path) -> Path:
+    """A tiny git clone with dist/ committed and tagged v9.9.9."""
     repo = tmp_path / "kit"
     repo.mkdir()
     _write_dist(repo, _kit_files())
@@ -173,9 +177,19 @@ def test_sync_copies_the_tag_and_check_passes(sync_kit: ModuleType, tmp_path: Pa
     _git("add", "-A", cwd=repo)
     _git("commit", "-q", "-m", "kit", cwd=repo)
     _git("tag", "-a", "v9.9.9", "-m", "v9.9.9", cwd=repo)
-    kit_dir = tmp_path / "web" / "kit"
+    return repo
+
+
+def _charts(sync_kit: ModuleType, tmp_path: Path) -> Path:
     charts = tmp_path / "charts.py"
     charts.write_text(f"Theme = str\n\n{sync_kit.BLOCK_START}\n{sync_kit.BLOCK_END}\n", encoding="utf-8")
+    return charts
+
+
+def test_sync_copies_the_tag_and_check_passes(sync_kit: ModuleType, tmp_path: Path) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    charts = _charts(sync_kit, tmp_path)
 
     copied = sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=charts)
 
@@ -198,3 +212,266 @@ def test_sync_copies_the_tag_and_check_passes(sync_kit: ModuleType, tmp_path: Pa
 def test_vendored_kit_matches_its_manifest(sync_kit: ModuleType) -> None:
     assert (sync_kit.KIT_DIR / "VERSION").read_text(encoding="utf-8").strip() == sync_kit.KIT_TAG
     assert sync_kit.check(sync_kit.KIT_TAG, sync_kit.DEFAULT_KIT_REPO, None) == []
+
+
+@pytest.mark.parametrize("tag", ["--output={out}", "-v9.9.9", "-", "--", ""])
+def test_read_archive_refuses_a_tag_that_looks_like_an_option(
+    sync_kit: ModuleType, tmp_path: Path, tag: str
+) -> None:
+    repo = _kit_repo(tmp_path)
+    out = tmp_path / "pwned.tar"
+    with pytest.raises(sync_kit.KitError, match="Refusing the tag"):
+        sync_kit.read_archive(repo, tag.format(out=out))
+    assert not out.exists()
+    assert not (repo / out.name).exists()
+
+
+def test_sync_refuses_the_option_tag_before_touching_anything(sync_kit: ModuleType, tmp_path: Path) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    with pytest.raises(sync_kit.KitError, match="Refusing the tag"):
+        sync_kit.sync(repo, "--output=x.tar", kit_dir=kit_dir, charts=tmp_path / "charts.py")
+    assert not kit_dir.parent.exists()
+    assert not (repo / "x.tar").exists()
+
+
+Entry = tuple[tarfile.TarInfo, bytes]
+
+
+def _entry(name: str, data: bytes = b"x", kind: bytes = tarfile.REGTYPE, link: str = "") -> Entry:
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = link
+    info.size = len(data) if kind == tarfile.REGTYPE else 0
+    return info, data
+
+
+def _tar(*entries: Entry) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for info, data in entries:
+            archive.addfile(info, io.BytesIO(data) if info.isreg() else None)
+    return buffer.getvalue()
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, sync_kit: ModuleType, payload: bytes) -> list[list[str]]:
+    """Make `git archive` return ``payload``; the returned list collects the commands that were run."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout=payload, stderr=b"")
+
+    monkeypatch.setattr(sync_kit.subprocess, "run", fake_run)
+    return calls
+
+
+def _fake_clone(tmp_path: Path) -> Path:
+    repo = tmp_path / "fake-kit"
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    return repo
+
+
+def test_git_archive_gets_a_double_dash_before_the_tag(
+    sync_kit: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _serve(monkeypatch, sync_kit, _tar(_entry("dist/tokens.css")))
+    assert sync_kit.read_archive(_fake_clone(tmp_path), "v9.9.9") == {"tokens.css": b"x"}
+    assert calls[0][-5:] == ["archive", "--format=tar", "--", "v9.9.9", "dist"]
+    assert calls[0][:3] == ["git", "-c", "core.autocrlf=false"]
+
+
+UNSAFE_NAMES = [
+    "",
+    "/abs",
+    "../x",
+    "a/../b",
+    "a//b",
+    "./x",
+    "a/./b",
+    "a/",
+    "x\\y",
+    "C:/x",
+    "a:b",
+    "x/a:b",
+    "a\x00b",
+    "a\nb",
+    "CON",
+    "con.css",
+    "a/PRN",
+    "AUX.tar.gz",
+    "nul",
+    "COM1",
+    "x/com9.txt",
+    "LPT1",
+    "lpt9.css",
+    "dir/Nul .css",
+]
+SAFE_NAMES = ["tokens.css", "fonts/inter-latin-wght-normal.woff2", "console.js", "com10.css", "nullable.js"]
+
+
+@pytest.mark.parametrize("name", UNSAFE_NAMES)
+def test_check_relative_rejects_unsafe_names(sync_kit: ModuleType, name: str) -> None:
+    with pytest.raises(sync_kit.KitError, match="unsafe path"):
+        sync_kit._check_relative(name)
+
+
+@pytest.mark.parametrize("name", SAFE_NAMES)
+def test_check_relative_accepts_plain_names(sync_kit: ModuleType, name: str) -> None:
+    sync_kit._check_relative(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../x", "dist/../x", "dist/a:b", "dist/a//b", "dist/CON.css", "dist/x\\y", "other/x", "dist", "/dist/x"],
+)
+def test_read_archive_rejects_unsafe_or_foreign_members(
+    sync_kit: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    _serve(monkeypatch, sync_kit, _tar(_entry("dist/tokens.css"), _entry(name)))
+    with pytest.raises(sync_kit.KitError, match="Refusing"):
+        sync_kit.read_archive(_fake_clone(tmp_path), "v9.9.9")
+
+
+@pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE, tarfile.CHRTYPE])
+def test_read_archive_rejects_links_and_devices(
+    sync_kit: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: bytes
+) -> None:
+    _serve(
+        monkeypatch,
+        sync_kit,
+        _tar(_entry("dist/tokens.css"), _entry("dist/link", kind=kind, link="/etc/passwd")),
+    )
+    with pytest.raises(sync_kit.KitError, match="not a regular file"):
+        sync_kit.read_archive(_fake_clone(tmp_path), "v9.9.9")
+
+
+def test_read_archive_skips_folders_and_rejects_duplicates(
+    sync_kit: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folders = (_entry("dist", kind=tarfile.DIRTYPE), _entry("dist/fonts", kind=tarfile.DIRTYPE))
+    _serve(monkeypatch, sync_kit, _tar(*folders, _entry("dist/fonts/a.css", b"a")))
+    assert sync_kit.read_archive(_fake_clone(tmp_path), "v9.9.9") == {"fonts/a.css": b"a"}
+    _serve(monkeypatch, sync_kit, _tar(_entry("dist/a.css", b"1"), _entry("dist/a.css", b"2")))
+    with pytest.raises(sync_kit.KitError, match="twice"):
+        sync_kit.read_archive(_fake_clone(tmp_path), "v9.9.9")
+
+
+def _earlier_copy(kit_dir: Path) -> dict[str, bytes]:
+    kit_dir.mkdir(parents=True)
+    (kit_dir / "VERSION").write_bytes(b"v0.0.1\n")
+    (kit_dir / "old.css").write_bytes(b"old")
+    return {"VERSION": b"v0.0.1\n", "old.css": b"old"}
+
+
+def _leftovers(parent: Path) -> list[str]:
+    return sorted(item.name for item in parent.iterdir() if item.name.startswith(".kit-"))
+
+
+def test_sync_refuses_to_replace_a_folder_that_is_not_a_kit_copy(
+    sync_kit: ModuleType, tmp_path: Path
+) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    kit_dir.mkdir(parents=True)
+    (kit_dir / "notes.txt").write_bytes(b"mine")
+    with pytest.raises(sync_kit.KitError, match="not an earlier kit copy"):
+        sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=_charts(sync_kit, tmp_path))
+    assert sync_kit.read_dir(kit_dir) == {"notes.txt": b"mine"}
+    assert _leftovers(kit_dir.parent) == []
+
+
+def test_sync_refuses_to_replace_a_file(sync_kit: ModuleType, tmp_path: Path) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    kit_dir.parent.mkdir()
+    kit_dir.write_bytes(b"mine")
+    with pytest.raises(sync_kit.KitError, match="not a folder"):
+        sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=_charts(sync_kit, tmp_path))
+    assert kit_dir.read_bytes() == b"mine"
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [{}, {"VERSION": b"v0.0.1\n"}, {"MANIFEST.json": b"[]", "stale.css": b"old"}],
+    ids=["empty", "version", "manifest"],
+)
+def test_sync_replaces_an_empty_folder_or_an_earlier_copy(
+    sync_kit: ModuleType, tmp_path: Path, seed: dict[str, bytes]
+) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    kit_dir.mkdir(parents=True)
+    for name, data in seed.items():
+        (kit_dir / name).write_bytes(data)
+    assert sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=_charts(sync_kit, tmp_path)) == 4
+    assert sorted(sync_kit.read_dir(kit_dir)) == [
+        "MANIFEST.json",
+        "VERSION",
+        "echarts-theme.js",
+        "fonts/fonts.css",
+        "tokens.css",
+    ]
+    assert _leftovers(kit_dir.parent) == []
+
+
+def test_sync_checks_charts_markers_before_touching_the_kit(sync_kit: ModuleType, tmp_path: Path) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    earlier = _earlier_copy(kit_dir)
+    charts = tmp_path / "charts.py"
+    charts.write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(sync_kit.KitError, match="markers"):
+        sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=charts)
+    assert sync_kit.read_dir(kit_dir) == earlier
+    assert charts.read_text(encoding="utf-8") == "x = 1\n"
+    assert _leftovers(kit_dir.parent) == []
+
+
+def test_sync_restores_the_earlier_copy_when_the_swap_fails(
+    sync_kit: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    earlier = _earlier_copy(kit_dir)
+    real_replace = os.replace
+
+    def flaky(src: Path, dst: Path) -> None:
+        if Path(dst) == kit_dir and not str(src).endswith(".old"):
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(sync_kit.os, "replace", flaky)
+    with pytest.raises(sync_kit.KitError, match="disk full"):
+        sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=_charts(sync_kit, tmp_path))
+    assert sync_kit.read_dir(kit_dir) == earlier
+    assert [item.name for item in kit_dir.parent.iterdir()] == ["kit"]
+
+
+def test_a_second_sync_changes_nothing(sync_kit: ModuleType, tmp_path: Path) -> None:
+    repo = _kit_repo(tmp_path)
+    kit_dir = tmp_path / "web" / "kit"
+    charts = _charts(sync_kit, tmp_path)
+    sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=charts)
+    kit_before = sync_kit.read_dir(kit_dir)
+    charts_before = charts.read_bytes()
+    assert b"#058DB5" in charts_before
+    old = 1_000_000_000 * 10**9
+    os.utime(charts, ns=(old, old))
+
+    assert sync_kit.sync(repo, "v9.9.9", kit_dir=kit_dir, charts=charts) == 4
+    assert sync_kit.update_palette(kit_dir, charts) is True
+
+    assert sync_kit.read_dir(kit_dir) == kit_before
+    assert charts.read_bytes() == charts_before
+    assert charts.stat().st_mtime_ns == old
+    assert sync_kit.check("v9.9.9", repo, None, kit_dir=kit_dir, charts=charts) == []
+    assert _leftovers(kit_dir.parent) == []
+
+
+def test_replace_block_is_idempotent(sync_kit: ModuleType) -> None:
+    block = sync_kit.render_block(sync_kit.parse_palette(theme_js("freeze")))
+    source = f"Theme = str\n\n{sync_kit.BLOCK_START}\n{sync_kit.BLOCK_END}\n\nx = 1\n"
+    once = sync_kit.replace_block(source, block)
+    assert sync_kit.replace_block(once, block) == once
+    assert once.count(sync_kit.BLOCK_START) == 1 and once.count(sync_kit.BLOCK_END) == 1
