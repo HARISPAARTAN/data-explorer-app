@@ -1,0 +1,6 @@
+label,formula,amount
+a,=SUM(A1:A2),1
+b,+1+1,-2
+c,-minus,3
+d,@mention,-4
+e,plain,5

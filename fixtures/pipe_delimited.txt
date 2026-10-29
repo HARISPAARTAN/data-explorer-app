@@ -1,0 +1,16 @@
+id|city|amount
+1|Milan|10.5
+2|Bergamo|11.5
+3|Brescia|12.5
+4|Como|13.5
+5|Monza|14.5
+6|Pavia|15.5
+7|Varese|16.5
+8|Lecco|17.5
+9|Milan|18.5
+10|Bergamo|19.5
+11|Brescia|20.5
+12|Como|21.5
+13|Monza|22.5
+14|Pavia|23.5
+15|Varese|24.5
