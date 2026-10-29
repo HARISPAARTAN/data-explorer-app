@@ -1,0 +1,377 @@
+{
+  "columns": [
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "text",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "order_id",
+      "stats": {
+        "max_length": 10,
+        "mean_length": 10.0
+      },
+      "top": [
+        [
+          "ORD-000013",
+          2
+        ],
+        [
+          "ORD-000038",
+          2
+        ],
+        [
+          "ORD-000446",
+          2
+        ],
+        [
+          "ORD-000468",
+          2
+        ],
+        [
+          "ORD-000494",
+          2
+        ]
+      ],
+      "unique": 6000
+    },
+    {
+      "count": 6060,
+      "dtype": "datetime64[us]",
+      "kind": "datetime",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "order_date",
+      "stats": {
+        "max": "2025-06-30T00:00:00",
+        "min": "2024-01-01T00:00:00",
+        "span_days": 546.0
+      },
+      "top": [],
+      "unique": 547
+    },
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "categorical",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "store",
+      "stats": {},
+      "top": [
+        [
+          "Milan",
+          1381
+        ],
+        [
+          "Bergamo",
+          843
+        ],
+        [
+          "Brescia",
+          794
+        ],
+        [
+          "Monza",
+          709
+        ],
+        [
+          "Como",
+          689
+        ]
+      ],
+      "unique": 8
+    },
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "categorical",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "category",
+      "stats": {},
+      "top": [
+        [
+          "Lighting",
+          1038
+        ],
+        [
+          "Decor",
+          1020
+        ],
+        [
+          "Garden",
+          1020
+        ],
+        [
+          "Textiles",
+          1002
+        ],
+        [
+          "Kitchen",
+          995
+        ]
+      ],
+      "unique": 6
+    },
+    {
+      "count": 6060,
+      "dtype": "int64",
+      "kind": "numeric",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "units",
+      "stats": {
+        "max": 400,
+        "mean": 7.200495,
+        "median": 7.0,
+        "min": 1,
+        "negatives": 0,
+        "p25": 4.0,
+        "p75": 10.0,
+        "std": 14.420382,
+        "zeros": 0
+      },
+      "top": [],
+      "unique": 27
+    },
+    {
+      "count": 6060,
+      "dtype": "float64",
+      "kind": "numeric",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "unit_price_eur",
+      "stats": {
+        "max": 149.9,
+        "mean": 50.734983,
+        "median": 45.9,
+        "min": 3.9,
+        "negatives": 0,
+        "p25": 24.9,
+        "p75": 67.9,
+        "std": 32.043539,
+        "zeros": 0
+      },
+      "top": [],
+      "unique": 147
+    },
+    {
+      "count": 5880,
+      "dtype": "Int64",
+      "kind": "numeric",
+      "missing": 180,
+      "missing_pct": 2.970297,
+      "name": "discount_pct",
+      "stats": {
+        "max": 20,
+        "mean": 5.079082,
+        "median": 0.0,
+        "min": 0,
+        "negatives": 0,
+        "p25": 0.0,
+        "p75": 10.0,
+        "std": 6.208903,
+        "zeros": 2950
+      },
+      "top": [],
+      "unique": 5
+    },
+    {
+      "count": 6060,
+      "dtype": "float64",
+      "kind": "numeric",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "revenue_eur",
+      "stats": {
+        "max": 28937.7,
+        "mean": 345.911332,
+        "median": 230.04,
+        "min": 4.41,
+        "negatives": 0,
+        "p25": 103.2,
+        "p75": 449.1,
+        "std": 779.664764,
+        "zeros": 0
+      },
+      "top": [],
+      "unique": 3243
+    },
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "categorical",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "payment",
+      "stats": {},
+      "top": [
+        [
+          "Card",
+          4247
+        ],
+        [
+          "Cash",
+          1326
+        ],
+        [
+          "Voucher",
+          487
+        ]
+      ],
+      "unique": 3
+    },
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "categorical",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "customer_type",
+      "stats": {},
+      "top": [
+        [
+          "Returning",
+          3909
+        ],
+        [
+          "New",
+          2151
+        ]
+      ],
+      "unique": 2
+    },
+    {
+      "count": 6060,
+      "dtype": "str",
+      "kind": "categorical",
+      "missing": 0,
+      "missing_pct": 0.0,
+      "name": "country",
+      "stats": {},
+      "top": [
+        [
+          "IT",
+          6060
+        ]
+      ],
+      "unique": 1
+    }
+  ],
+  "generator": "data-explorer-app 0.1.0",
+  "quality": {
+    "constant_columns": [
+      {
+        "all_missing": false,
+        "name": "country",
+        "value": "IT"
+      }
+    ],
+    "duplicates": {
+      "duplicate_rows": 60,
+      "groups": 60,
+      "subset": []
+    },
+    "missing": [
+      {
+        "column": "discount_pct",
+        "missing": 180,
+        "missing_pct": 2.970297
+      }
+    ],
+    "outliers": {
+      "columns": [
+        {
+          "column": "units",
+          "iqr": 6.0,
+          "lower": -5.0,
+          "n_high": 15,
+          "n_low": 0,
+          "pct": 0.247525,
+          "q1": 4.0,
+          "q3": 10.0,
+          "upper": 19.0
+        },
+        {
+          "column": "unit_price_eur",
+          "iqr": 43.0,
+          "lower": -39.6,
+          "n_high": 124,
+          "n_low": 0,
+          "pct": 2.046205,
+          "q1": 24.9,
+          "q3": 67.9,
+          "upper": 132.4
+        },
+        {
+          "column": "discount_pct",
+          "iqr": 10.0,
+          "lower": -15.0,
+          "n_high": 0,
+          "n_low": 0,
+          "pct": 0.0,
+          "q1": 0.0,
+          "q3": 10.0,
+          "upper": 25.0
+        },
+        {
+          "column": "revenue_eur",
+          "iqr": 345.9,
+          "lower": -415.65,
+          "n_high": 234,
+          "n_low": 0,
+          "pct": 3.861386,
+          "q1": 103.2,
+          "q3": 449.1,
+          "upper": 967.95
+        }
+      ],
+      "k": 1.5,
+      "zero_iqr": []
+    }
+  },
+  "schema_version": 1,
+  "shape": {
+    "cells": 66660,
+    "columns": 11,
+    "duplicate_rows": 60,
+    "kinds": {
+      "boolean": 0,
+      "categorical": 5,
+      "datetime": 1,
+      "numeric": 4,
+      "text": 1
+    },
+    "missing_cells": 180,
+    "missing_cells_pct": 0.270027,
+    "rows": 6060
+  },
+  "source": {
+    "blank_to_missing": 0,
+    "date_columns": [
+      "order_date"
+    ],
+    "decimal": ",",
+    "delimiter": ";",
+    "encoding": "utf-8-sig",
+    "file_name": "retail_orders.csv",
+    "file_type": "csv",
+    "header_row": 0,
+    "n_cols": 11,
+    "n_rows": 6060,
+    "renamed_columns": [],
+    "sha256": "868d4fcb8a94e0224750cb3d767a7b0a98819a1ec4e2058a356d47fc72ee2fec",
+    "sheet": null,
+    "sheets": [],
+    "size_bytes": 423371
+  },
+  "view": {
+    "columns": null,
+    "filter_text": "",
+    "rows_in_view": 6060,
+    "scope": "dataset",
+    "sort": []
+  },
+  "warnings": []
+}
