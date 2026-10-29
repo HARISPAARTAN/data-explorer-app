@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -32,6 +33,7 @@ NONE = "(none)"
 IN_VALUES = 200
 TABLE_ROWS = 1_000
 FLASH = "w.f.flash"
+VALUE_KEYS = ("w.f.value", "w.f.value2", "w.f.text", "w.f.date", "w.f.date_range")
 EXAMPLES = (
     '`store` IN ("Milan", "Como") AND `units` BETWEEN 2 AND 10',
     '`order_date` >= "2025-01-01" OR `payment` = "Voucher"',
@@ -55,6 +57,13 @@ def flash(place: str, message: str) -> None:
 def on_mode() -> None:
     mode = "all" if st.session_state["w.f.mode"] == MODES[0] else "any"
     set_filter(FilterSpec(mode, current().conditions))
+
+
+def on_condition_input_change() -> None:
+    """A new column or operator: drop the value inputs so the next run seeds them for it."""
+    for key in VALUE_KEYS:
+        if key in st.session_state:
+            del st.session_state[key]
 
 
 def on_remove(index: int) -> None:
@@ -160,6 +169,12 @@ def frequent(series: pd.Series) -> list[Any]:
     return series.dropna().value_counts().head(IN_VALUES).index.tolist()
 
 
+def finite_numbers(series: pd.Series) -> np.ndarray:
+    """The values a number input can show: no missing values and no infinities."""
+    array = series.to_numpy(dtype="float64", na_value=np.nan)
+    return array[np.isfinite(array)]
+
+
 def value_widgets(series: pd.Series, kind: Kind, op: Op) -> None:
     if op in (Op.IS_NULL, Op.NOT_NULL):
         st.caption("This operator needs no value.")
@@ -171,22 +186,29 @@ def value_widgets(series: pd.Series, kind: Kind, op: Op) -> None:
         st.multiselect("Values", options, key="w.f.values")
         st.caption(f"The {min(IN_VALUES, len(options))} most frequent values are offered.")
     elif kind == "numeric":
-        low = float(values.min()) if len(values) else 0.0
-        high = float(values.max()) if len(values) else 0.0
-        if op == Op.BETWEEN:
-            st.number_input("From", value=low, key="w.f.value")
-            st.number_input("To", value=high, key="w.f.value2")
+        numbers = finite_numbers(values)
+        if len(numbers):
+            low, high, middle = float(numbers.min()), float(numbers.max()), float(np.median(numbers))
         else:
-            st.number_input("Value", value=float(values.median()) if len(values) else 0.0, key="w.f.value")
+            low = high = middle = 0.0
+            st.caption("This column has no finite values; the inputs start at 0.")
+        if op == Op.BETWEEN:
+            state.seed("w.f.value", low)
+            state.seed("w.f.value2", high)
+            st.number_input("From", key="w.f.value")
+            st.number_input("To", key="w.f.value2")
+        else:
+            state.seed("w.f.value", middle)
+            st.number_input("Value", key="w.f.value")
     elif kind == "datetime":
         first = pd.Timestamp(values.min()).date() if len(values) else dt.date(2025, 1, 1)
         last = pd.Timestamp(values.max()).date() if len(values) else first
         if op == Op.BETWEEN:
-            st.date_input(
-                "Date range", value=(first, last), min_value=first, max_value=last, key="w.f.date_range"
-            )
+            state.seed("w.f.date_range", (first, last))
+            st.date_input("Date range", min_value=first, max_value=last, key="w.f.date_range")
         else:
-            st.date_input("Date", value=first, min_value=first, max_value=last, key="w.f.date")
+            state.seed("w.f.date", first)
+            st.date_input("Date", min_value=first, max_value=last, key="w.f.date")
     elif kind == "boolean":
         st.selectbox("Value", ["TRUE", "FALSE"], key="w.f.bool")
     elif kind == "categorical" and op in (Op.EQ, Op.NE):
@@ -194,6 +216,7 @@ def value_widgets(series: pd.Series, kind: Kind, op: Op) -> None:
         state.seed("w.f.choice", options[0] if options else None, options)
         st.selectbox("Value", options, key="w.f.choice")
     else:
+        state.seed("w.f.text", "")
         st.text_input("Text", key="w.f.text")
 
 
@@ -218,11 +241,17 @@ else:
 with st.container(border=True):
     st.markdown("**Add a condition**")
     state.seed("w.f.column", columns[0], columns)
-    column = st.selectbox("Column", columns, key="w.f.column")
+    column = st.selectbox("Column", columns, key="w.f.column", on_change=on_condition_input_change)
     kind = classify(df[column])
     operators = list(ops_for(kind))
     state.seed("w.f.op", operators[0], operators)
-    op = st.selectbox("Operator", operators, format_func=lambda item: OP_LABELS[item], key="w.f.op")
+    op = st.selectbox(
+        "Operator",
+        operators,
+        format_func=lambda item: OP_LABELS[item],
+        key="w.f.op",
+        on_change=on_condition_input_change,
+    )
     value_widgets(df[column], kind, Op(op))
     full = len(spec.conditions) >= MAX_CONDITIONS
     st.button("Add condition", key="w.f.add", on_click=on_add, disabled=full)

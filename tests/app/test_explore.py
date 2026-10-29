@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import numpy as np
 from streamlit.testing.v1 import AppTest
 
 from data_explorer.core.filters import Condition, FilterSpec, Op, SortKey, apply_filter, parse_filter
@@ -99,3 +100,109 @@ def test_columns_and_sort(loaded: Callable[..., AppTest], goto: Callable[[AppTes
         at.selectbox(key="w.v.sort.1.column").value == "units"
         and at.toggle(key="w.v.sort.1.desc").value is True
     )
+
+
+def test_switching_the_column_reseeds_the_number_inputs(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    df = load_sample("retail_orders")[0]
+    at = goto(loaded("retail_orders"), "4_Explore")
+    at.selectbox(key="w.f.column").set_value("units").run()
+    at.selectbox(key="w.f.op").set_value(Op.BETWEEN).run()
+    assert at.number_input(key="w.f.value").value == df["units"].min()
+    assert at.number_input(key="w.f.value2").value == df["units"].max()
+    at.number_input(key="w.f.value").set_value(7).run()
+    at.selectbox(key="w.f.column").set_value("revenue_eur").run()
+    assert at.number_input(key="w.f.value").value == df["revenue_eur"].min()
+    assert at.number_input(key="w.f.value2").value == df["revenue_eur"].max()
+    at.button(key="w.f.add").click().run()
+    low, high = df["revenue_eur"].min(), df["revenue_eur"].max()
+    assert at.session_state["de.filter"].conditions == (Condition("revenue_eur", Op.BETWEEN, (low, high)),)
+
+
+def test_switching_the_operator_reseeds_the_number_inputs(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    df = load_sample("retail_orders")[0]
+    at = goto(loaded("retail_orders"), "4_Explore")
+    at.selectbox(key="w.f.column").set_value("units").run()
+    at.selectbox(key="w.f.op").set_value(Op.BETWEEN).run()
+    at.number_input(key="w.f.value").set_value(3).run()
+    at.selectbox(key="w.f.op").set_value(Op.GT).run()
+    assert at.number_input(key="w.f.value").value == df["units"].median()
+
+
+def test_infinite_values_do_not_reach_the_number_inputs(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = loaded("retail_orders")
+    df = at.session_state["de.df"].copy()
+    df.loc[df.index[0], "revenue_eur"] = np.inf
+    df.loc[df.index[1], "revenue_eur"] = -np.inf
+    at.session_state["de.df"] = df
+    finite = df["revenue_eur"][np.isfinite(df["revenue_eur"])]
+    at = goto(at, "4_Explore")
+    at.selectbox(key="w.f.column").set_value("revenue_eur").run()
+    at.selectbox(key="w.f.op").set_value(Op.BETWEEN).run()
+    assert not at.exception, at.exception
+    assert at.number_input(key="w.f.value").value == finite.min()
+    assert at.number_input(key="w.f.value2").value == finite.max()
+
+
+def test_a_column_without_finite_values_starts_at_zero(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = loaded("retail_orders")
+    df = at.session_state["de.df"].copy()
+    df["revenue_eur"] = np.inf
+    at.session_state["de.df"] = df
+    at = goto(at, "4_Explore")
+    at.selectbox(key="w.f.column").set_value("revenue_eur").run()
+    at.selectbox(key="w.f.op").set_value(Op.BETWEEN).run()
+    assert not at.exception, at.exception
+    assert (at.number_input(key="w.f.value").value, at.number_input(key="w.f.value2").value) == (0.0, 0.0)
+    assert "This column has no finite values; the inputs start at 0." in [c.value for c in at.main.caption]
+
+
+def test_ten_conditions_disable_the_add_button(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = goto(loaded("retail_orders"), "4_Explore")
+    assert at.button(key="w.f.add").disabled is False
+    text = " AND ".join(f"`units` > {n}" for n in range(10))
+    at.text_area(key="w.f.text_form").set_value(text).run()
+    at.button(key="w.f.apply_text").click().run()
+    assert len(at.session_state["de.filter"].conditions) == 10
+    assert at.button(key="w.f.add").disabled is True
+    assert "A filter has at most 10 conditions." in [caption.value for caption in at.main.caption]
+
+
+def test_categorical_equals_through_the_choice_widget(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    df = load_sample("retail_orders")[0]
+    at = goto(loaded("retail_orders"), "4_Explore")
+    at.selectbox(key="w.f.column").set_value("payment").run()
+    at.selectbox(key="w.f.op").set_value(Op.EQ).run()
+    choice = at.selectbox(key="w.f.choice").options[-1]
+    at.selectbox(key="w.f.choice").set_value(choice).run()
+    at.button(key="w.f.add").click().run()
+    spec = at.session_state["de.filter"]
+    assert spec == FilterSpec("all", (Condition("payment", Op.EQ, choice),))
+    expected = len(apply_filter(df, spec))
+    assert 0 < expected < len(df)
+    assert match_caption(at) == f"{expected:,} of 6,060 rows match ({expected / 6060 * 100:.1f} %)"
+
+
+def test_reversed_between_shows_the_error(
+    loaded: Callable[..., AppTest], goto: Callable[[AppTest, str], AppTest]
+) -> None:
+    at = goto(loaded("retail_orders"), "4_Explore")
+    at.selectbox(key="w.f.column").set_value("units").run()
+    at.selectbox(key="w.f.op").set_value(Op.BETWEEN).run()
+    at.number_input(key="w.f.value").set_value(10).run()
+    at.number_input(key="w.f.value2").set_value(2).run()
+    at.button(key="w.f.add").click().run()
+    assert not at.exception, at.exception
+    assert [element.value for element in at.error] == ["Condition 1: BETWEEN needs the smaller value first."]
+    assert at.session_state["de.filter"] == FilterSpec()
