@@ -2,11 +2,14 @@
 // against the live Pages URL. Fails on any console error or page error (except exact texts allowed in
 // stlite_console_allow.json with an upstream issue link or a stated reason), on any request to a host other than the page's own
 // origin, cdn.jsdelivr.net, pypi.org and files.pythonhosted.org, and on any step that does not finish in time.
-// One host is tolerated: stlite.invalid, the placeholder host (.invalid never resolves) in the media URLs that
-// Streamlit's download button checks when it renders. stlite 1.12.0 cannot answer that check, the download itself
-// works (the Download step saves the file and counts its lines). Those requests are counted and printed as
-// "stlite media-check misses", never as external requests. Both browser contexts use colorScheme dark, the
-// published look of the kit; the page follows prefers-color-scheme.
+// One host is tolerated, and only below /media/: stlite.invalid, the placeholder host (.invalid never resolves) in
+// the media URLs that Streamlit's download button checks when it renders. stlite 1.12.0 cannot answer that check,
+// the download itself works (the Download step saves the file and counts its lines). Those requests are counted
+// and printed as "stlite media-check misses", never as external requests; any other path on that host fails.
+// The number of allow-listed console messages that fired is printed too, so an allow-list entry that has become
+// dead (or a new flood of the same text) shows. After every step of the app context no Streamlit exception
+// element may be on the page. Both browser contexts use colorScheme dark, the published look of the kit; the
+// page follows prefers-color-scheme.
 //
 // Environment: URL (default http://127.0.0.1:8000/), OUT (required; screenshots, download.csv, weights.json and
 // thumb-1440.jpg go there, never into the repository), PLAYWRIGHT_FROM (a package.json for createRequire; unset in
@@ -66,6 +69,7 @@ async function loadPlaywright() {
 
 const failures = [];
 const mediaMisses = [];
+let allowedConsole = 0;
 const fail = (message) => {
   failures.push(message);
   console.log(`FAIL ${message}`);
@@ -87,7 +91,9 @@ async function step(name, action) {
 function watch(context, page, label, hosts) {
   const nonGet = [];
   const onConsole = (message) => {
-    if (message.type() === 'error' && !isAllowed(message)) fail(`${label}: console error: ${message.text()}`);
+    if (message.type() !== 'error') return;
+    if (isAllowed(message)) allowedConsole += 1;
+    else fail(`${label}: console error: ${message.text()}`);
   };
   page.on('console', onConsole);
   page.on('pageerror', (error) => fail(`${label}: page error: ${error.message}`));
@@ -96,7 +102,7 @@ function watch(context, page, label, hosts) {
   context.on('request', (request) => {
     const url = new URL(request.url());
     if (url.protocol === 'blob:' || url.protocol === 'data:') return;
-    if (url.host === MEDIA_CHECK_HOST) mediaMisses.push(request.url());
+    if (url.host === MEDIA_CHECK_HOST && url.pathname.startsWith('/media/')) mediaMisses.push(request.url());
     else if (!ALLOWED_HOSTS.has(url.host)) fail(`${label}: request to ${url.host}: ${request.url()}`);
     if (request.method() !== 'GET') nonGet.push(`${request.method()} ${request.url()}`);
   });
@@ -134,11 +140,26 @@ const app = page.locator('[data-testid="stApp"]');
 const sidebar = page.locator('[data-testid="stSidebar"]');
 const heading = (text) => app.locator('h1').filter({ hasText: new RegExp(`^${text}$`) });
 const visible = (locator, timeout = STEP_TIMEOUT) => locator.first().waitFor({ state: 'visible', timeout });
+// A page that raised shows a Streamlit exception element; every step of the app context must end without one.
+const appStep = (name, action) =>
+  step(name, async () => {
+    await action();
+    const raised = await app.locator('[data-testid="stException"]').count();
+    if (raised) throw new Error(`${raised} Streamlit exception element(s) on the page`);
+  });
 // Streamlit shows stSkeleton placeholders while its widgets load; a screenshot waits until they are gone.
 const shot = async (name) => {
   await app.locator('[data-testid="stSkeleton"]').first().waitFor({ state: 'detached', timeout: STEP_TIMEOUT });
   await page.screenshot({ path: path.join(OUT, name) });
 };
+// Scroll the app's main area so that the element's top sits `margin` px below the main area's top, which leaves
+// room for Streamlit's header. Only the main area moves: element.scrollIntoView() would also shift the app
+// frame (stMain is as tall as the window, the frame is 40 px shorter below the banner), and the sidebar with it.
+const scrollMain = (locator, margin = 80) =>
+  locator.first().evaluate((element, offset) => {
+    const main = element.closest('[data-testid="stMain"]');
+    main.scrollTop += element.getBoundingClientRect().top - main.getBoundingClientRect().top - offset;
+  }, margin);
 const openPage = async (label, title) => {
   await sidebar.getByRole('link', { name: label, exact: true }).click();
   await visible(heading(title));
@@ -150,13 +171,13 @@ const chooseSample = async (title) => {
   await app.getByRole('button', { name: 'Load', exact: true }).click();
 };
 
-const booted = await step('the app starts and shows the Upload page', async () => {
+const booted = await appStep('the app starts and shows the Upload page', async () => {
   await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
   await visible(heading('Upload'), BOOT_TIMEOUT);
 });
 
 if (booted) {
-  await step('the retail sample loads', async () => {
+  await appStep('the retail sample loads', async () => {
     await chooseSample('Retail orders');
     await visible(page.getByText('Loaded retail_orders.csv: 6,060 rows × 11 columns.'));
     // The pointer rests on the button after the click and Streamlit darkens a hovered button: measure it at rest.
@@ -169,33 +190,41 @@ if (booted) {
     weights.primary_button = { ...style, ratio: Number(((high + 0.05) / (low + 0.05)).toFixed(2)) };
     await shot('upload-1440.png');
   });
-  await step('Overview', async () => {
+  await appStep('Overview', async () => {
     await openPage('Overview', 'Overview');
     await visible(app.getByText('First 100 of 6,060 rows', { exact: true }));
     await shot('overview-1440.png');
   });
-  await step('Quality', async () => {
+  await appStep('Quality', async () => {
     await openPage('Quality', 'Quality');
     await visible(app.getByText('60 duplicate rows in 60 groups', { exact: true }));
     await visible(app.locator('.vega-embed canvas, .vega-embed svg'));
     await shot('quality-1440.png');
   });
-  await step('Explore', async () => {
+  await appStep('Explore', async () => {
     await openPage('Explore', 'Explore');
-    await visible(app.getByText('6,060 of 6,060 rows match (100.0 %)', { exact: true }));
+    const caption = app.getByText('6,060 of 6,060 rows match (100.0 %)', { exact: true });
+    await visible(caption);
+    // The result sits below the filter builder: bring its heading to the top so that the 1440 x 900 frame
+    // holds the caption and the start of the table.
+    await scrollMain(app.getByRole('heading', { name: 'Result', exact: true }), 60);
+    await page.waitForTimeout(500);
     await shot('explore-1440.png');
   });
-  await step('Visualise renders a Vega chart', async () => {
+  await appStep('Visualise renders a Vega chart', async () => {
     await openPage('Visualise', 'Visualise');
     await visible(app.locator('.vega-embed canvas, .vega-embed svg'));
     await app.locator('[data-testid="stRadio"]').getByText('Line', { exact: true }).click();
     await visible(app.getByText('Weekly count of rows; weeks run Monday to Sunday.', { exact: true }));
     await visible(app.locator('.vega-embed canvas, .vega-embed svg'));
+    // The chart starts below the controls and its bottom edge is below the fold of a 1440 x 900 frame: scroll
+    // until the whole chart, with its axes, is in view.
+    await scrollMain(app.locator('.vega-embed'), 120);
     await page.waitForTimeout(1500);
     await shot('visualise-1440.png');
     await page.screenshot({ path: path.join(OUT, 'thumb-1440.jpg'), type: 'jpeg', quality: THUMB_QUALITY });
   });
-  await step('Download gives the CSV with 6,061 lines', async () => {
+  await appStep('Download gives the CSV with 6,061 lines', async () => {
     await openPage('Download', 'Download');
     await visible(app.getByText('Current view: 6,060 rows × 11 columns · filter: none', { exact: true }));
     const [download] = await Promise.all([
@@ -208,12 +237,12 @@ if (booted) {
     if (lines !== 6061) throw new Error(`the CSV has ${lines} lines, expected 6,061`);
     await shot('download-1440.png');
   });
-  await step('the survey workbook loads with openpyxl', async () => {
+  await appStep('the survey workbook loads with openpyxl', async () => {
     await openPage('Upload', 'Upload');
     await chooseSample('Client survey');
     await visible(page.getByText('Loaded client_survey.xlsx: 1,224 rows × 11 columns.'));
   });
-  await step('an uploaded file is read in the browser without sending it anywhere', async () => {
+  await appStep('an uploaded file is read in the browser without sending it anywhere', async () => {
     await app.getByText('Upload a file', { exact: true }).click();
     const before = nonGet.length;
     await app.locator('[data-testid="stFileUploader"] input[type="file"]').setInputFiles(UPLOAD_FIXTURE);
@@ -224,7 +253,7 @@ if (booted) {
     const sent = nonGet.slice(before);
     if (sent.length) throw new Error(`requests other than GET during the upload: ${sent.join(', ')}`);
   });
-  await step('Overview at 390 px has no horizontal scrolling', async () => {
+  await appStep('Overview at 390 px has no horizontal scrolling', async () => {
     await chooseSample('Retail orders');
     await visible(page.getByText('Loaded retail_orders.csv: 6,060 rows × 11 columns.'));
     await openPage('Overview', 'Overview');
@@ -267,6 +296,7 @@ weights.total_bytes = Object.values(hosts).reduce((sum, entry) => sum + entry.by
 fs.writeFileSync(path.join(OUT, 'weights.json'), JSON.stringify(weights, null, 2) + '\n');
 for (const [host, entry] of Object.entries(hosts)) console.log(`     ${host}: ${entry.requests} requests, ${entry.bytes} bytes`);
 console.log(`     stlite media-check misses: ${mediaMisses.length} requests to ${MEDIA_CHECK_HOST} (never resolves, not counted as external requests)`);
+console.log(`     allow-listed console messages fired: ${allowedConsole} (${allowList.length} entries in the allow-list)`);
 if (weights.primary_button) console.log(`     primary button: ${weights.primary_button.color} on ${weights.primary_button.background}, ${weights.primary_button.ratio}:1`);
 console.log(failures.length ? `stlite_smoke: ${failures.length} failures` : `stlite_smoke: all steps passed (${PAGE_URL})`);
 process.exit(failures.length ? 1 : 0);
