@@ -100,7 +100,15 @@ for (const file of FILES) {
       continue;
     }
     const [target, anchor] = link.split('#');
-    const resolved = target ? path.posix.normalize(path.posix.join(path.posix.dirname(file), decodeURI(target))) : file;
+    const route = target.split('?')[0]; // a query string is not part of the file name
+    let decoded;
+    try {
+      decoded = decodeURI(route);
+    } catch {
+      fail(`${file}: ${link} has a malformed % escape`);
+      continue;
+    }
+    const resolved = route ? path.posix.normalize(path.posix.join(path.posix.dirname(file), decoded)) : file;
     if (resolved.startsWith('..')) {
       fail(`${file}: ${link} points outside the repository`);
     } else if (!fs.existsSync(path.join(ROOT, resolved))) {

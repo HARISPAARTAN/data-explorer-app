@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const LIMIT = 3 * 1024 * 1024;
-const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+const mb = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MB (${bytes.toLocaleString('en-US')} bytes)`;
 
 function files(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -35,7 +35,14 @@ if (process.env.WEIGHTS) {
   for (const [host, entry] of Object.entries(weights.hosts).sort((a, b) => b[1].bytes - a[1].bytes)) {
     console.log(`${host.padEnd(26)} ${String(entry.requests).padStart(4)} requests  ${mb(entry.bytes)}`);
   }
-  const own = weights.hosts[weights.origin]?.bytes ?? 0;
+  if (!(weights.origin in weights.hosts)) {
+    // Without the page's own host nothing can be compared with the cap: say so instead of passing silently.
+    console.log(
+      `page-weight: FAIL the measured origin ${weights.origin} is not among the hosts (${Object.keys(weights.hosts).join(', ') || 'none'}), the cap was not checked against it`,
+    );
+    process.exit(1);
+  }
+  const own = weights.hosts[weights.origin].bytes;
   console.log(`page-weight: received ${mb(weights.total_bytes)} in total, ${mb(own)} from ${weights.origin}`);
   if (own > LIMIT) failed = true;
 }
