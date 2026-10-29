@@ -147,6 +147,7 @@ def test_switching_the_operator_reseeds_the_number_inputs(
     at.number_input(key="w.f.value").set_value(3).run()
     at.selectbox(key="w.f.op").set_value(Op.GT).run()
     assert at.number_input(key="w.f.value").value == df["units"].median()
+    assert at.number_input(key="w.f.value").proto.set_value is True
 
 
 def test_infinite_values_do_not_reach_the_number_inputs(

@@ -144,13 +144,20 @@ def scan_name(name: str, patterns: Patterns) -> list[Hit]:
     return [Hit(where, 0, rule, text) for rule, text in sorted(found)]
 
 
+class NotUtf8Text(ValueError):
+    """The banned file decodes as UTF-8 but holds NUL bytes (UTF-16 without a BOM does)."""
+
+
 def load_patterns(path: Path | None) -> list[tuple[str, re.Pattern[str]]]:
     """The patterns of a banned file (UTF-8, a BOM is dropped); an invalid one is a ``re.error`` that
-    names its line but does not repeat it."""
+    names its line but does not repeat it, and a file with NUL bytes is not text (``NotUtf8Text``)."""
     if path is None:
         return []
     patterns: list[tuple[str, re.Pattern[str]]] = []
-    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+    text = path.read_text(encoding="utf-8-sig")
+    if "\0" in text:
+        raise NotUtf8Text("a NUL byte")
+    for number, line in enumerate(text.splitlines(), start=1):
         if line.strip() and not line.startswith("#"):
             try:
                 patterns.append((line, re.compile(line, re.IGNORECASE)))
@@ -246,7 +253,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         patterns = load_patterns(args.banned_file)
-    except UnicodeDecodeError:
+    except (UnicodeDecodeError, NotUtf8Text):
         print("scrub: cannot use the banned file: it is not UTF-8 text", file=sys.stderr)
         return 2
     except (OSError, ValueError, re.error) as exc:

@@ -247,6 +247,21 @@ def test_a_banned_file_that_is_not_utf8_is_a_usage_error_without_a_traceback(
     assert captured.out == "" and "UTF-8" in captured.err and "Traceback" not in captured.err
 
 
+@pytest.mark.parametrize(
+    "content", [b"secretcorp\x00", b"# note\n\x00secretcorp\n", "secretcorp".encode("utf-16-le")]
+)
+def test_a_banned_file_with_nul_bytes_is_not_utf8_text(
+    scrub: ModuleType, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], content: bytes
+) -> None:
+    """UTF-16 without a byte order mark decodes as UTF-8 with NUL bytes between the letters."""
+    banned = tmp_path / "banned.txt"
+    banned.write_bytes(content)
+    assert scrub.main(["--root", str(repo), "--banned-file", str(banned)]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "not UTF-8 text" in captured.err and "Traceback" not in captured.err
+    assert "secretcorp" not in captured.err
+
+
 def test_a_root_that_is_not_a_repository_is_a_usage_error(
     scrub: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
