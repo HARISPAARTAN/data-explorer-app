@@ -1,0 +1,20 @@
+# Server settings; web/index.html passes the same client, browser and theme keys to stlite
+# (tests/tools/test_config_parity.py compares them).
+
+[server]
+maxUploadSize = 50
+runOnSave = false
+
+[client]
+toolbarMode = "viewer"
+showSidebarNavigation = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#F2A93B"
+backgroundColor = "#0B0F14"
+secondaryBackgroundColor = "#121820"
+textColor = "#E6EDF3"
