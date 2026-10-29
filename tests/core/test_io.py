@@ -447,7 +447,8 @@ def test_workbook_declaring_a_huge_part_is_refused_before_openpyxl_reads_it(
 
 
 def test_unpacked_size_cap_is_ten_times_the_upload_limit(tight_limits: Any) -> None:
-    data = make_xlsx([["a", "b"], [1, 2]])
+    # Padded so that the total, not the 2.6 KB styles part (capped at half the limit), is what the limit meets.
+    data = with_part(make_xlsx([["a", "b"], [1, 2]]), "xl/padding.xml", b" " * 100_000)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         declared = sum(item.file_size for item in archive.infolist())
     enough = dataclasses.replace(
@@ -668,3 +669,199 @@ def test_report_is_json_safe(fixture_bytes: Read) -> None:
     assert json.loads(json.dumps(payload)) == payload
     assert payload["renamed_columns"][0] == ["", "column_3"]
     assert payload["sha256"] == report.sha256 and len(report.sha256) == 64
+
+
+CONTENT_TYPES = "[Content_Types].xml"
+STYLES = "xl/styles.xml"
+SHARED_STRINGS_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+MAIN_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def shared_strings_xml(*strings: str) -> bytes:
+    items = "".join(f"<si><t>{text}</t></si>" for text in strings)
+    return f'<sst xmlns="{MAIN_NAMESPACE}" count="{len(strings)}" uniqueCount="{len(strings)}">{items}</sst>'.encode()
+
+
+def with_registered_shared_strings(part: str, body: bytes, *, extra: tuple[str, ...] = ()) -> bytes:
+    """A workbook with the header cells ``a`` and ``b`` as shared strings 0 and 1, kept in ``part``.
+
+    ``[Content_Types].xml`` registers ``part`` (and every name of ``extra``) as the shared strings, as Excel
+    does for ``xl/sharedStrings.xml``; ``part`` holds ``body``.
+    """
+    base = make_xlsx([["a", "b"], [1, 2]])
+    cells = patch_member(
+        base,
+        SHEET,
+        lambda xml: xml.replace(b't="inlineStr"><is><t>a</t></is>', b't="s"><v>0</v>').replace(
+            b't="inlineStr"><is><t>b</t></is>', b't="s"><v>1</v>'
+        ),
+    )
+    overrides = "".join(
+        f'<Override PartName="/{name}" ContentType="{SHARED_STRINGS_TYPE}"/>' for name in (part, *extra)
+    ).encode()
+    registered = patch_member(
+        cells, CONTENT_TYPES, lambda xml: xml.replace(b"</Types>", overrides + b"</Types>")
+    )
+    with zipfile.ZipFile(io.BytesIO(registered)) as archive:
+        assert b"inlineStr" not in archive.read(SHEET)  # the header comes from the shared strings
+    return with_part(registered, part, body)
+
+
+def assert_refused_before_openpyxl(
+    bomb: bytes, limits: dio.Limits, monkeypatch: pytest.MonkeyPatch, tail: str
+) -> None:
+    """Every entry point refuses ``bomb`` as ``<name> has <tail>``, within 2 s and without opening it."""
+
+    def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("openpyxl was asked to open the workbook")
+
+    monkeypatch.setattr(dio, "load_workbook", never)
+    calls = {  # label: (name in the message, call)
+        "load_table": ("bomb.xlsx", lambda: load_table(bomb, "bomb.xlsx", limits=limits)),
+        "list_sheets": ("bomb.xlsx", lambda: list_sheets(bomb, "bomb.xlsx", limits)),
+        "detect_sheet": ("the workbook", lambda: detect_sheet(bomb, limits)),
+    }
+    for label, (name, call) in calls.items():
+        started = time.perf_counter()
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert time.perf_counter() - started < 2.0, label
+        assert caught.value.code == "too_large", label
+        assert caught.value.message == f"{name} has {tail}", label
+
+
+@pytest.mark.parametrize(
+    ("limits", "megabytes", "limit"),
+    [(SERVER_LIMITS, 60, "50 MB"), (BROWSER_LIMITS, 25, "20 MB")],
+    ids=["server", "browser"],
+)
+def test_a_huge_shared_strings_part_under_another_name_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch, limits: dio.Limits, megabytes: int, limit: str
+) -> None:
+    declared = megabytes * MiB
+    assert declared <= dio.XLSX_EXPANSION * limits.max_bytes  # only the per-part cap can refuse it
+    bomb = with_registered_shared_strings("xl/strings1.xml", shared_strings_of_size(declared))
+    with zipfile.ZipFile(io.BytesIO(bomb)) as archive:
+        assert "xl/sharedStrings.xml" not in archive.namelist()  # nothing carries the usual name
+    assert len(bomb) < MiB // 4  # a few KiB of Deflate stand for the whole part
+    assert_refused_before_openpyxl(
+        bomb,
+        limits,
+        monkeypatch,
+        f"xl/strings1.xml unpacking to {megabytes} MB; the limit is {limit} unpacked for that part "
+        "(the upload limit).",
+    )
+
+
+def test_every_registration_of_the_shared_strings_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    bomb = with_registered_shared_strings(
+        "xl/small.xml", shared_strings_xml("a", "b"), extra=("xl/huge.xml",)
+    )
+    bomb = with_part(bomb, "xl/huge.xml", shared_strings_of_size(60 * MiB))
+    assert_refused_before_openpyxl(
+        bomb,
+        SERVER_LIMITS,
+        monkeypatch,
+        "xl/huge.xml unpacking to 60 MB; the limit is 50 MB unpacked for that part (the upload limit).",
+    )
+
+
+@pytest.mark.parametrize("part", ["xl/sharedStrings.xml", "xl/strings1.xml"])
+def test_shared_strings_are_read_from_the_part_the_content_types_name(part: str) -> None:
+    data = with_registered_shared_strings(part, shared_strings_xml("x", "y"))
+    df, _ = load_table(data, "named.xlsx", limits=SERVER_LIMITS)
+    assert list(df.columns) == ["x", "y"] and df.shape == (1, 2)  # openpyxl used this part for the header
+    assert list_sheets(data, "named.xlsx", SERVER_LIMITS) == ("Sheet",)
+    assert detect_sheet(data, SERVER_LIMITS) == "Sheet"
+
+
+def test_a_part_that_the_content_types_do_not_name_is_not_a_shared_strings_part() -> None:
+    # openpyxl never reads xl/sharedStrings.xml here, so its size is only the total cap's business.
+    data = with_registered_shared_strings("xl/strings1.xml", shared_strings_xml("x", "y"))
+    data = with_part(data, "xl/sharedStrings.xml", shared_strings_of_size(60 * MiB))
+    df, _ = load_table(data, "unread.xlsx", limits=SERVER_LIMITS)
+    assert list(df.columns) == ["x", "y"]
+
+
+@pytest.mark.parametrize("limits", [SERVER_LIMITS, BROWSER_LIMITS], ids=["server", "browser"])
+def test_the_packaged_workbook_sample_passes_every_cap(limits: dio.Limits) -> None:
+    data = sample_bytes("client_survey")
+    df, _ = load_table(data, "client_survey.xlsx", limits=limits)
+    assert df.shape[1] == 11
+    assert list_sheets(data, "client_survey.xlsx", limits) == ("Responses", "Notes")
+    assert detect_sheet(data, limits) == "Responses"
+
+
+def test_content_types_part_may_declare_one_mib(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = make_xlsx([["a", "b"], [1, 2]])
+    at_limit = patch_member(base, CONTENT_TYPES, lambda xml: xml.ljust(MiB))
+    df, _ = load_table(at_limit, "limit.xlsx", limits=SERVER_LIMITS)
+    assert list(df.columns) == ["a", "b"]
+    assert list_sheets(at_limit, "limit.xlsx", SERVER_LIMITS) == ("Sheet",)
+    assert detect_sheet(at_limit, SERVER_LIMITS) == "Sheet"
+    over = patch_member(base, CONTENT_TYPES, lambda xml: xml.ljust(MiB + 1))
+    assert_refused_before_openpyxl(
+        over,
+        SERVER_LIMITS,
+        monkeypatch,
+        "[Content_Types].xml unpacking to 1.0 MB; the limit is 1 MB unpacked for that part.",
+    )
+
+
+def test_content_types_cap_does_not_depend_on_the_upload_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    over = patch_member(make_xlsx([["a", "b"], [1, 2]]), CONTENT_TYPES, lambda xml: xml.ljust(2 * MiB))
+    assert_refused_before_openpyxl(
+        over,
+        BROWSER_LIMITS,
+        monkeypatch,
+        "[Content_Types].xml unpacking to 2 MB; the limit is 1 MB unpacked for that part.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("limits", "megabytes", "limit"),
+    [(SERVER_LIMITS, 26, "25 MB"), (BROWSER_LIMITS, 11, "10 MB")],
+    ids=["server", "browser"],
+)
+def test_an_oversized_styles_part_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch, limits: dio.Limits, megabytes: int, limit: str
+) -> None:
+    declared = megabytes * MiB
+    assert declared <= dio.XLSX_EXPANSION * limits.max_bytes  # only the styles cap can refuse it
+    bomb = patch_member(make_xlsx([["a", "b"], [1, 2]]), STYLES, lambda xml: xml.ljust(declared))
+    assert len(bomb) < MiB // 4
+    assert_refused_before_openpyxl(
+        bomb,
+        limits,
+        monkeypatch,
+        f"xl/styles.xml unpacking to {megabytes} MB; the limit is {limit} unpacked for that part "
+        "(half the upload limit).",
+    )
+
+
+def test_styles_part_may_declare_half_the_upload_limit(tight_limits: Any) -> None:
+    limits = dataclasses.replace(tight_limits, max_bytes=100_000)  # the total cap, 1,000,000, is far away
+    base = make_xlsx([["a", "b"], [1, 2]])
+    at_limit = patch_member(base, STYLES, lambda xml: xml.ljust(50_000))
+    df, _ = load_table(at_limit, "limit.xlsx", limits=limits)
+    assert list(df.columns) == ["a", "b"] and df.shape == (1, 2)
+    over = patch_member(base, STYLES, lambda xml: xml.ljust(50_001))
+    for call in (
+        lambda: load_table(over, "over.xlsx", limits=limits),
+        lambda: list_sheets(over, "over.xlsx", limits),
+        lambda: detect_sheet(over, limits),
+    ):
+        with pytest.raises(LoadError) as caught:
+            call()
+        assert caught.value.code == "too_large"
+        assert "xl/styles.xml unpacking to 50,001 bytes; the limit is 50,000 bytes" in caught.value.message
+
+
+def test_the_total_cap_is_checked_before_the_part_caps() -> None:
+    limits = dataclasses.replace(SERVER_LIMITS, max_bytes=MiB)  # 10 MB in all, 512 KB for the styles
+    bomb = patch_member(make_xlsx([["a", "b"], [1, 2]]), STYLES, lambda xml: xml.ljust(600 * 1024))
+    bomb = with_part(bomb, "xl/padding.xml", b" " * (10 * MiB))
+    with pytest.raises(LoadError) as caught:
+        list_sheets(bomb, "both.xlsx", limits)
+    assert caught.value.message.startswith("both.xlsx unpacks to 10.")
+    assert caught.value.message.endswith("the limit is 10 MB unpacked (10 times the upload limit).")

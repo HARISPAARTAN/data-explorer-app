@@ -16,9 +16,10 @@ import os
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import PurePath
@@ -41,7 +42,11 @@ SHEET_SCAN_ROWS = 200
 MAX_HEADER_ROW = 19
 XLSX_MAX_ROWS = 1_048_576  # the row limit of Excel itself; a <row r=...> beyond it is not a real sheet
 XLSX_EXPANSION = 10  # a workbook may declare at most this many times the upload limit once unpacked
-XLSX_SHARED_STRINGS = "xl/sharedStrings.xml"  # parsed whole on open; it may declare at most the upload limit
+XLSX_CONTENT_TYPES = "[Content_Types].xml"  # lists every part; openpyxl finds the shared strings through it
+XLSX_CONTENT_TYPES_BYTES = MiB  # a real one is a few KiB
+XLSX_SHARED_STRINGS = "xl/sharedStrings.xml"  # the usual name; the content types decide which part counts
+XLSX_SHARED_STRINGS_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+XLSX_STYLES = "xl/styles.xml"  # parsed whole on open; it may declare at most half the upload limit
 DATE_SHARE_PERCENT = 95
 DATE_LIKE_PERCENT = 50
 ENCODINGS = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
@@ -383,31 +388,66 @@ def detect_header_row(rows: Sequence[Sequence[object]]) -> int:
     return 0
 
 
+def _check_part_size(
+    items: Sequence[zipfile.ZipInfo], names: Collection[str], file_name: str, cap: int, note: str
+) -> None:
+    """Refuse a workbook in which a member called one of ``names`` declares more than ``cap`` bytes."""
+    for item in items:
+        if item.filename in names and item.file_size > cap:
+            raise LoadError(
+                "too_large",
+                f"{file_name} has {item.filename} unpacking to {_size_text(item.file_size)}; "
+                f"the limit is {_size_text(cap)} unpacked for that part{note}.",
+            )
+
+
+def _shared_strings_parts(archive: zipfile.ZipFile) -> frozenset[str]:
+    """The members openpyxl may read as the shared strings, found through the content types.
+
+    openpyxl does not look for ``xl/sharedStrings.xml``: it takes the ``PartName`` of the ``Override`` in
+    ``[Content_Types].xml`` whose ``ContentType`` is the shared-strings type, and reads no shared strings when
+    there is none. Every such entry counts here, at any depth and in any namespace, so that no registration
+    can hide a part; when the content types register none, the usual name stands in. openpyxl drops the first
+    character of a part name (the ``/``); both that and the name without any leading ``/`` are listed.
+    """
+    root: ET.Element = ET.fromstring(archive.read(XLSX_CONTENT_TYPES))
+    names: set[str] = set()
+    for element in root.iter():
+        part: str | None = element.get("PartName")
+        if (
+            element.tag.rpartition("}")[2] == "Override"
+            and element.get("ContentType") == XLSX_SHARED_STRINGS_TYPE
+            and part
+        ):
+            names.update((part[1:], part.lstrip("/")))
+    return frozenset(names) or frozenset((XLSX_SHARED_STRINGS,))
+
+
 def _check_unpacked_size(data: bytes, file_name: str, limits: Limits) -> None:
     """Refuse a workbook that declares too much once unpacked.
 
-    Two caps, both on the sizes in the zip directory (``zipfile`` stops a member at its declared size, so
-    they bound the work): all parts together at most 10 times the upload limit, and ``xl/sharedStrings.xml``
-    at most the upload limit. openpyxl parses the shared strings completely on open, and Deflate reaches
-    about 1,000:1, so a few hundred KB of that part cost tens of seconds and over a gigabyte.
+    The caps are on the sizes in the zip directory (``zipfile`` stops a member at its declared size, so they
+    bound the work). All parts together: at most 10 times the upload limit, checked first. Then the parts
+    openpyxl parses whole on open: ``[Content_Types].xml`` at most 1 MiB, ``xl/styles.xml`` at most half the
+    upload limit, and the shared-strings part, found through the content types, at most the upload limit.
+    Deflate reaches about 1,000:1, so a few hundred KB of the shared strings cost tens of seconds and over a
+    gigabyte.
     """
-    cap = XLSX_EXPANSION * limits.max_bytes
+    cap: int = XLSX_EXPANSION * limits.max_bytes
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         items: list[zipfile.ZipInfo] = archive.infolist()
-    declared: int = sum(item.file_size for item in items)
-    if declared > cap:
-        raise LoadError(
-            "too_large",
-            f"{file_name} unpacks to {_size_text(declared)}; the limit is {_size_text(cap)} unpacked "
-            f"({XLSX_EXPANSION} times the upload limit).",
-        )
-    for item in items:
-        if item.filename == XLSX_SHARED_STRINGS and item.file_size > limits.max_bytes:
+        declared: int = sum(item.file_size for item in items)
+        if declared > cap:
             raise LoadError(
                 "too_large",
-                f"{file_name} has {XLSX_SHARED_STRINGS} unpacking to {_size_text(item.file_size)}; "
-                f"the limit is {_size_text(limits.max_bytes)} unpacked for that part (the upload limit).",
+                f"{file_name} unpacks to {_size_text(declared)}; the limit is {_size_text(cap)} unpacked "
+                f"({XLSX_EXPANSION} times the upload limit).",
             )
+        _check_part_size(items, (XLSX_CONTENT_TYPES,), file_name, XLSX_CONTENT_TYPES_BYTES, "")
+        _check_part_size(items, (XLSX_STYLES,), file_name, limits.max_bytes // 2, " (half the upload limit)")
+        _check_part_size(
+            items, _shared_strings_parts(archive), file_name, limits.max_bytes, " (the upload limit)"
+        )
 
 
 def _open_workbook(data: bytes, file_name: str, limits: Limits | None = None) -> Any:

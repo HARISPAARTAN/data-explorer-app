@@ -38,6 +38,8 @@ The image serves on port 8501 as the user `app` (uid 10001); its health check ca
 
 An empty variable counts as unset. A limit that is not a positive integer stops the Upload page with "DATA_EXPLORER_MAX_ROWS must be a positive integer" (or the name of the variable concerned). The browser demo ignores these variables and uses 20 MB, 200,000 rows and 200 columns.
 
+An `.xlsx` file is also checked against the sizes its zip directory declares, before openpyxl opens it: all parts together at most 10 times the upload limit, the shared-strings part at most the upload limit (it is found through the package's `[Content_Types].xml`, the way openpyxl finds it, not by its file name), `xl/styles.xml` at most half the upload limit and `[Content_Types].xml` itself at most 1 MB. A workbook whose shared-strings part is just under its cap still costs about 10 to 15 seconds and 370 to 390 MB to open (measured with a part of 48 to 50 MB on the server, one open), a cost bounded by the upload limit; the caps stop the larger cases, they do not make that one cheaper.
+
 ## Logs
 
 The logger `data_explorer` writes one line per event to stdout: `<time> <LEVEL> data_explorer <message>`. A load logs `load file_type=csv size_bytes=... rows=... cols=... duration_ms=...`; an unexpected error logs `unexpected error while <action>` with the traceback. The load line carries counts and a duration only, never a file name or a cell value; the traceback of an unexpected error ends with the exception message, which a library can word with a value from the data. In the browser the same lines appear in the developer console.
