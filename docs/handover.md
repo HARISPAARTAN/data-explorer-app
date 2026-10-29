@@ -40,7 +40,7 @@ An empty variable counts as unset. A limit that is not a positive integer stops 
 
 ## Logs
 
-The logger `data_explorer` writes one line per event to stdout: `<time> <LEVEL> data_explorer <message>`. A load logs `load file_type=csv size_bytes=... rows=... cols=... duration_ms=...`; an unexpected error logs `unexpected error while <action>` with the traceback. File names and cell values are never logged. In the browser the same lines appear in the developer console.
+The logger `data_explorer` writes one line per event to stdout: `<time> <LEVEL> data_explorer <message>`. A load logs `load file_type=csv size_bytes=... rows=... cols=... duration_ms=...`; an unexpected error logs `unexpected error while <action>` with the traceback. The load line carries counts and a duration only, never a file name or a cell value; the traceback of an unexpected error ends with the exception message, which a library can word with a value from the data. In the browser the same lines appear in the developer console.
 
 ## Adding a sample
 

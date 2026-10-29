@@ -229,6 +229,22 @@ def test_decimal_comma_with_thousands_and_negatives() -> None:
     assert df["a"].tolist() == [-1234.5, 2.25] and df["b"].tolist() == [7, -3]
 
 
+def test_decimal_comma_does_not_read_a_zero_point_as_thousands() -> None:
+    options = LoadOptions(delimiter=";", decimal=",")
+    df, report = load_table(b"x;y\n0.125;0.250\n0.5;0.75\n", "z.csv", options)
+    assert report.decimal == ","
+    assert df["x"].tolist() == ["0.125", "0.5"] and df["y"].tolist() == ["0.250", "0.75"]
+    assert pd.api.types.is_string_dtype(df["x"]) and pd.api.types.is_string_dtype(df["y"])
+    df, _ = load_table(b"x;y\n-0.125,5;0.125,5\n", "z.csv", options)
+    assert df["x"].tolist() == ["-0.125,5"] and df["y"].tolist() == ["0.125,5"]
+    df, _ = load_table(
+        b"i;f;n\n1.250;1.125,5;0\n12.500;123.456.789,25;-7\n-1.000;-1.000,5;100\n", "t.csv", options
+    )
+    assert df["i"].tolist() == [1250, 12500, -1000] and df["i"].dtype == "int64"
+    assert df["f"].tolist() == [1125.5, 123456789.25, -1000.5]
+    assert df["n"].tolist() == [0, -7, 100]
+
+
 @pytest.mark.parametrize(
     ("fixture", "file_name", "code"),
     [

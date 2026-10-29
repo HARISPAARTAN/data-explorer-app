@@ -1,4 +1,4 @@
-"""Shared fixtures: repository paths, tool loading, fixture files, a hand-made frame and the samples."""
+"""Shared fixtures: repository paths, tool loading, fixture files, a small frame with known statistics and the samples."""
 
 from __future__ import annotations
 

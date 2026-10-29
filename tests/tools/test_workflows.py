@@ -12,6 +12,8 @@ import pytest
 # "uses: owner/name@ref", optionally followed by a "# v1.2.3" comment that names the tag a commit pin stands for.
 USES = re.compile(r"^[ \t]*-?[ \t]*uses:[ \t]*(\S+)[ \t]*(?:#[^\n]*)?$", re.M)
 ACTION_REF = re.compile(r"[\w.-]+/[\w./-]+@(?:v\d+|[0-9a-f]{40})")
+SETUP_UV_PIN = re.compile(r"astral-sh/setup-uv@[0-9a-f]{40}")  # setup-uv is pinned by commit, never by tag
+WRITE_PERMISSION = re.compile(r":[ \t]*['\"]?write")  # a permission value, bare or quoted
 
 TIMEOUTS = {
     "ci": {"lint": 15, "test": 30, "core-py314": 20, "docker": 20, "stlite-local": 30},
@@ -101,11 +103,23 @@ def test_one_uv_version_everywhere(ci: str, repo_root: Path) -> None:
     docker_uv = re.search(r"ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)@", dockerfile)
     assert docker_uv is not None
     setups = re.findall(
-        r"uses: astral-sh/setup-uv@(?:v\d+|[0-9a-f]{40})[ \t]*(?:#[^\n]*)?\n\s+with:\n\s+version: \"([\d.]+)\"",
+        r"uses: astral-sh/setup-uv@[0-9a-f]{40}[ \t]*(?:#[^\n]*)?\n\s+with:\n\s+version: \"([\d.]+)\"",
         ci,
     )
     assert len(setups) == ci.count("astral-sh/setup-uv@") == 3
     assert set(setups) == {docker_uv.group(1)}
+
+
+def test_setup_uv_is_pinned_by_commit_and_the_patterns_have_teeth(ci: str) -> None:
+    refs = re.findall(r"astral-sh/setup-uv@\S+", ci)
+    assert len(refs) == 3 and all(SETUP_UV_PIN.fullmatch(ref) for ref in refs), refs
+    assert SETUP_UV_PIN.fullmatch("astral-sh/setup-uv@" + "a" * 40)
+    for loose in ("astral-sh/setup-uv@v10", "astral-sh/setup-uv@v10.3.3", "astral-sh/setup-uv@" + "a" * 39):
+        assert not SETUP_UV_PIN.fullmatch(loose), loose
+    for permission in ("contents: write", "contents:write", 'pages: "write"', "id-token: 'write'"):
+        assert WRITE_PERMISSION.search(permission), permission
+    for harmless in ("contents: read", "id-token: none", "# no write access"):
+        assert WRITE_PERMISSION.search(harmless) is None, harmless
 
 
 def test_every_uv_sync_uses_the_lock(ci: str) -> None:
@@ -187,7 +201,7 @@ def test_write_permissions_only_in_the_pages_deploy_job(name: str, ci: str, page
     text = ci if name == "ci" else pages
     if name == "pages":
         text = text.replace(job(pages, "deploy"), "")
-    assert re.search(r":[ \t]*write", text) is None
+    assert WRITE_PERMISSION.search(text) is None
 
 
 @pytest.mark.parametrize("name", ["ci", "pages"])
