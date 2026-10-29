@@ -41,7 +41,7 @@ def json_safe(value: object) -> JSONValue:
         rounded = round(number, FLOAT_DECIMALS)
         return 0.0 if rounded == 0 else rounded
     if isinstance(value, str):
-        return value
+        return str(value)
     if isinstance(value, np.datetime64):
         if np.isnat(value):
             return None
@@ -57,5 +57,9 @@ def json_safe(value: object) -> JSONValue:
     if isinstance(value, list | tuple):
         return [json_safe(item) for item in value]
     if isinstance(value, np.ndarray):
+        if value.dtype.kind in "Mm":
+            # ndarray.tolist() yields epoch integers for nanosecond units, so go through pandas
+            # to get Timestamp / Timedelta / NaT objects that the scalar rules then handle.
+            value = pd.Series(value.ravel()).astype(object).to_numpy().reshape(value.shape)
         return [json_safe(item) for item in value.tolist()]
     raise TypeError(f"Cannot convert a {type(value).__name__} object to JSON")

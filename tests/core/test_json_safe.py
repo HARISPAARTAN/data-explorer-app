@@ -53,6 +53,18 @@ def test_containers_enums_and_dataclasses() -> None:
     assert json_safe(Pair(0.1234567, (1, 2))) == {"left": 0.123457, "right": [1, 2]}
 
 
+def test_datetime64_arrays_are_iso_8601() -> None:
+    assert json_safe(np.array(["2025-03-01"], dtype="datetime64[ns]")) == ["2025-03-01T00:00:00"]
+    assert json_safe(np.array(["2025-03-01"], dtype="datetime64[us]")) == ["2025-03-01T00:00:00"]
+    with_nat = np.array(["2025-03-01", "NaT"], dtype="datetime64[ns]")
+    assert json_safe(with_nat) == ["2025-03-01T00:00:00", None]
+
+
+def test_numpy_strings_become_plain_str() -> None:
+    assert json_safe(np.str_("a")) == "a"
+    assert type(json_safe(np.str_("a"))) is str
+
+
 def test_unknown_types_raise() -> None:
     with pytest.raises(TypeError, match="object"):
         json_safe(object())
