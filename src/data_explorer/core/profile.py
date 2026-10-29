@@ -50,16 +50,20 @@ class DatasetProfile:
         return json_object(self)
 
 
-def classify(series: pd.Series[Any]) -> Kind:
+def _classify(series: pd.Series[Any], unique: int) -> Kind:
     if pd.api.types.is_bool_dtype(series.dtype):
         return "boolean"
     if pd.api.types.is_numeric_dtype(series.dtype):
         return "numeric"
     if pd.api.types.is_datetime64_any_dtype(series.dtype):
         return "datetime"
-    if int(series.nunique(dropna=True)) <= CATEGORICAL_MAX_UNIQUE:
+    if unique <= CATEGORICAL_MAX_UNIQUE:
         return "categorical"
     return "text"
+
+
+def classify(series: pd.Series[Any]) -> Kind:
+    return _classify(series, int(series.nunique(dropna=True)))
 
 
 def _numeric_stats(series: pd.Series[Any]) -> dict[str, Stat]:
@@ -95,16 +99,15 @@ def _datetime_stats(series: pd.Series[Any]) -> dict[str, Stat]:
     }
 
 
-def _top(series: pd.Series[Any]) -> tuple[tuple[str, int], ...]:
-    counts = series.dropna().astype("str").value_counts()
-    pairs = sorted(
-        ((str(value), int(count)) for value, count in counts.items()), key=lambda item: (-item[1], item[0])
-    )
-    return tuple(pairs[:TOP_N])
+def _top(labels: pd.Series[str]) -> tuple[tuple[str, int], ...]:
+    """Most frequent labels: count descending, then label ascending by string order."""
+    counts = labels.value_counts().sort_index(kind="stable").sort_values(ascending=False, kind="stable")
+    return tuple((str(label), int(count)) for label, count in counts.head(TOP_N).items())
 
 
 def profile_column(series: pd.Series[Any], name: str) -> ColumnProfile:
-    kind = classify(series)
+    unique = int(series.nunique(dropna=True))
+    kind = _classify(series, unique)
     n_rows = len(series)
     missing = int(series.isna().sum())
     stats: dict[str, Stat] = {}
@@ -117,9 +120,10 @@ def profile_column(series: pd.Series[Any], name: str) -> ColumnProfile:
         values = series.dropna().astype("bool")
         stats = {"true": int(values.sum()), "false": int((~values).sum())}
     else:
-        top = _top(series)
+        labels = series.dropna().astype("str")
+        top = _top(labels)
         if kind == "text":
-            lengths = series.dropna().astype("str").str.len()
+            lengths = labels.str.len()
             stats = {
                 "mean_length": float(lengths.mean()) if len(lengths) else None,
                 "max_length": int(lengths.max()) if len(lengths) else None,
@@ -131,7 +135,7 @@ def profile_column(series: pd.Series[Any], name: str) -> ColumnProfile:
         count=n_rows - missing,
         missing=missing,
         missing_pct=missing / n_rows * 100 if n_rows else 0.0,
-        unique=int(series.nunique(dropna=True)),
+        unique=unique,
         stats=stats,
         top=top,
     )

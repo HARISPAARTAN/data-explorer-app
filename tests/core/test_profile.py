@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import statistics
 
 import pandas as pd
@@ -65,6 +66,27 @@ def test_text_lengths_and_top_ties() -> None:
     assert column.top[0] == ("value 000", 2) and column.top[1] == ("value 001", 1)
     ties = profile_column(pd.Series(["b", "a", "b", "a", "c"], dtype="str"), "x")
     assert ties.top == (("a", 2), ("b", 2), ("c", 1))
+
+
+def test_top_five_of_ten_thousand_labels_with_ties() -> None:
+    labels = [f"code-{i:05d}" for i in range(10_000)]
+    labels += ["code-07777"] * 4 + ["code-00003"] * 2 + ["code-09999"] * 2 + ["code-00500"]
+    random.Random(7).shuffle(labels)
+    column = profile_column(pd.Series(labels, dtype="str"), "codes")
+    assert column.kind == "text" and column.unique == 10_000
+    # 07777 has 5; 00003 and 09999 tie on 3 (label order); 00500 has 2; the count-1 tie goes to code-00000
+    assert column.top == (
+        ("code-07777", 5),
+        ("code-00003", 3),
+        ("code-09999", 3),
+        ("code-00500", 2),
+        ("code-00000", 1),
+    )
+
+
+def test_single_value_has_no_standard_deviation() -> None:
+    assert profile_column(pd.Series([5.0]), "one").stats["std"] is None
+    assert profile_column(pd.Series([5.0, None]), "one").stats["std"] is None
 
 
 def test_dataset_profile(small_df: pd.DataFrame) -> None:
