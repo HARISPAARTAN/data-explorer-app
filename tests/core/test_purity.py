@@ -48,21 +48,38 @@ def imported(path: Path) -> list[str]:
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             names.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.append(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > 0:
+                names.append("." * node.level + (node.module or ""))
+            elif node.module:
+                names.append(node.module)
+                names.extend(f"{node.module}.{alias.name}" for alias in node.names)
     return names
 
 
 def test_core_imports_only_allowed_packages(repo_root: Path) -> None:
-    for path in sorted((repo_root / "src" / "data_explorer" / "core").glob("*.py")):
+    files = sorted((repo_root / "src" / "data_explorer" / "core").glob("*.py"))
+    assert files, "no files scanned"
+    for path in files:
         for name in imported(path):
+            if name.startswith("."):
+                assert not name.startswith(".."), f"{path.name} imports {name}"
+                continue
             top = name.split(".")[0]
+            if top == "data_explorer":
+                assert (
+                    name in ("data_explorer", "data_explorer.__version__")
+                    or name == "data_explorer.core"
+                    or name.startswith("data_explorer.core.")
+                ), f"{path.name} imports {name}"
             assert top in sys.stdlib_module_names or top in ALLOWED, f"{path.name} imports {name}"
 
 
 def test_app_code_never_imports_streamlit_testing(repo_root: Path) -> None:
     package = repo_root / "src" / "data_explorer"
-    for path in sorted(package.rglob("*.py")):
+    files = sorted(package.rglob("*.py"))
+    assert files, "no files scanned"
+    for path in files:
         names = imported(path)
         assert not [name for name in names if name.startswith("streamlit.testing")], path
     cli = package / "cli.py"
