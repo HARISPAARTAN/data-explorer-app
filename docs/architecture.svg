@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-labelledby="title desc">
+  <title id="title">Data Explorer App architecture</title>
+  <desc id="desc">Two runtimes run the same app pages: a Docker image on a server and stlite with Pyodide in the browser. The app pages call the pure core package, which reads CSV or XLSX bytes and writes CSV, JSON and Markdown. tools/sync_web.py copies the package into web/py for the browser, and CI checks the copy.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#93A1B0"/>
+    </marker>
+    <style>
+      text { font-family: Inter, "Segoe UI", Helvetica, Arial, sans-serif; fill: #E6EDF3; font-size: 14px; }
+      .title { font-size: 18px; font-weight: 600; }
+      .head { font-size: 15px; font-weight: 600; fill: #F2A93B; }
+      .muted { fill: #93A1B0; font-size: 13px; }
+      .mono { font-family: "JetBrains Mono", Consolas, monospace; font-size: 13px; }
+      .small { fill: #93A1B0; font-size: 12px; }
+      .box { fill: #121820; stroke: #1F2A36; stroke-width: 1.5; }
+      .core { fill: #182130; stroke: #F2A93B; stroke-width: 1.5; }
+      .flow { fill: none; stroke: #93A1B0; stroke-width: 1.5; marker-end: url(#arrow); }
+      .sync { fill: none; stroke: #93A1B0; stroke-width: 1.5; stroke-dasharray: 6 5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="960" height="520" rx="12" fill="#0B0F14"/>
+  <text class="title" x="24" y="40">Two runtimes, one code base</text>
+
+  <rect class="box" x="24" y="72" width="300" height="124" rx="8"/>
+  <text class="head" x="40" y="100">Server</text>
+  <text x="40" y="126">Docker image · CPython 3.12</text>
+  <text x="40" y="150">Streamlit 1.65.0</text>
+  <text class="muted" x="40" y="176">data-explorer run or docker run</text>
+
+  <rect class="box" x="24" y="228" width="300" height="172" rx="8"/>
+  <text class="head" x="40" y="256">Browser (GitHub Pages)</text>
+  <text x="40" y="282">stlite 1.12.0 · Streamlit 1.65.0</text>
+  <text x="40" y="306">Pyodide 314.0.3 (Python 3.14)</text>
+  <text class="muted" x="40" y="334">Outside hosts:</text>
+  <text class="muted" x="40" y="356">cdn.jsdelivr.net, pypi.org,</text>
+  <text class="muted" x="40" y="378">files.pythonhosted.org</text>
+
+  <rect class="box" x="364" y="150" width="256" height="150" rx="8"/>
+  <text class="head" x="380" y="178">app/</text>
+  <text x="380" y="204">Upload · Overview · Quality</text>
+  <text x="380" y="228">Explore · Visualise · Download</text>
+  <text class="muted" x="380" y="256">state.py · cache.py · ui.py</text>
+  <text class="muted" x="380" y="280">Streamlit pages, no logic</text>
+
+  <rect class="core" x="660" y="150" width="276" height="150" rx="8"/>
+  <text class="head" x="676" y="178">core/</text>
+  <text x="676" y="204">io · profile · quality</text>
+  <text x="676" y="228">filters · charts · export</text>
+  <text class="muted" x="676" y="256">pure functions, frozen results</text>
+  <text class="muted" x="676" y="280">never imports Streamlit</text>
+
+  <rect class="box" x="660" y="340" width="134" height="56" rx="8"/>
+  <text class="small" x="727" y="373" text-anchor="middle">CSV or XLSX bytes</text>
+  <rect class="box" x="802" y="340" width="134" height="56" rx="8"/>
+  <text class="small" x="869" y="373" text-anchor="middle">CSV, JSON, Markdown</text>
+
+  <path class="flow" d="M324 134 C 346 134, 342 200, 360 200"/>
+  <path class="flow" d="M324 314 C 346 314, 342 250, 360 250"/>
+  <path class="flow" d="M620 225 L 656 225"/>
+  <path class="flow" d="M727 340 L 727 304"/>
+  <path class="flow" d="M869 300 L 869 336"/>
+
+  <text class="mono" x="364" y="470">src/data_explorer/</text>
+  <path class="sync" d="M528 466 L 652 466"/>
+  <text class="mono" x="660" y="470">web/py/data_explorer/</text>
+  <text class="muted" x="590" y="452" text-anchor="middle">tools/sync_web.py, checked in CI</text>
+</svg>
