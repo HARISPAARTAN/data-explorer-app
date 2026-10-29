@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Upload a CSV or Excel file and get statistics, data quality, filters, charts and downloads. Python runs in your browser with stlite; nothing is uploaded.">
+  <title>Meridian Data Explorer · live demo</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="kit/fonts/fonts.css">
+  <link rel="stylesheet" href="kit/tokens.css">
+  <link rel="stylesheet" href="kit/base.css">
+  <script src="kit/theme-boot.js"></script>
+  <style>
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    /* The app fills the viewport under the kit banner. The transform makes #root the containing block of
+       Streamlit's fixed header and sidebar, so the banner never covers them. */
+    #root {
+      position: fixed;
+      top: calc(var(--pf-banner-h) + env(safe-area-inset-top));
+      right: 0;
+      bottom: 0;
+      left: 0;
+      overflow: auto;
+      transform: translateZ(0);
+    }
+    .de-intro { box-sizing: border-box; max-width: 760px; margin: var(--space-6) auto; padding-inline: var(--gutter); }
+    .de-intro .pf-card { display: grid; gap: var(--space-3); }
+    .de-intro p, .de-intro h1 { margin: 0; }
+    .de-shots { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
+    .de-shots img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .de-intro code { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <noscript>
+    <main class="de-intro">
+      <section class="pf-card">
+        <h1 class="pf-card__title">The live demo cannot start in this browser</h1>
+        <p>This demo runs Python inside your browser with WebAssembly and module workers. This browser does not support them or has them switched off, or the runtime could not be downloaded.</p>
+        <p>Try a current version of Chrome, Edge, Firefox or Safari, look at the screenshots below, or run the app yourself: <code>uv sync</code> and <code>uv run data-explorer run</code>, or <code>docker build -t data-explorer .</code> and <code>docker run -p 8501:8501 data-explorer</code>.</p>
+        <div class="de-shots">
+          <img src="assets/upload-1440.png" width="1440" height="900" alt="Upload page of the data explorer with the retail orders sample loaded">
+          <img src="assets/visualise-1440.png" width="1440" height="900" alt="Visualise page of the data explorer with a weekly line chart">
+        </div>
+        <p><a href="https://github.com/HARISPAARTAN/data-explorer-app">Source code on GitHub</a></p>
+        <p class="pf-footer">Rebuilt from memory as a demo. The original client&#39;s name and data are not used.</p>
+      </section>
+    </main>
+  </noscript>
+  <div id="root" data-state="loading">
+    <main class="de-intro">
+      <section class="pf-card" aria-live="polite">
+        <h1 class="pf-card__title">Meridian Data Explorer</h1>
+        <p>Starting Python in your browser. The first visit downloads the Python runtime and libraries from a public CDN; later visits load them from the browser cache. Your files are read inside this browser and are not uploaded anywhere.</p>
+        <p class="pf-footer">Rebuilt from memory as a demo. The original client&#39;s name and data are not used.</p>
+      </section>
+    </main>
+  </div>
+  <template id="fallback">
+    <main class="de-intro">
+      <section class="pf-card">
+        <h1 class="pf-card__title">The live demo cannot start in this browser</h1>
+        <p>This demo runs Python inside your browser with WebAssembly and module workers. This browser does not support them or has them switched off, or the runtime could not be downloaded.</p>
+        <p>Try a current version of Chrome, Edge, Firefox or Safari, look at the screenshots below, or run the app yourself: <code>uv sync</code> and <code>uv run data-explorer run</code>, or <code>docker build -t data-explorer .</code> and <code>docker run -p 8501:8501 data-explorer</code>.</p>
+        <div class="de-shots">
+          <img src="assets/upload-1440.png" width="1440" height="900" alt="Upload page of the data explorer with the retail orders sample loaded">
+          <img src="assets/visualise-1440.png" width="1440" height="900" alt="Visualise page of the data explorer with a weekly line chart">
+        </div>
+        <p><a href="https://github.com/HARISPAARTAN/data-explorer-app">Source code on GitHub</a></p>
+        <p class="pf-footer">Rebuilt from memory as a demo. The original client&#39;s name and data are not used.</p>
+      </section>
+    </main>
+  </template>
+  <script type="application/json" id="app-config">
+{
+  "entrypoint": "streamlit_app.py",
+  "requirements": ["pandas", "altair", "openpyxl==3.1.5"],
+  "streamlitConfig": {
+    "client.toolbarMode": "viewer",
+    "client.showSidebarNavigation": false,
+    "browser.gatherUsageStats": false
+  },
+  "themes": {
+    "dark": {
+      "theme.primaryColor": "#F2A93B",
+      "theme.backgroundColor": "#0B0F14",
+      "theme.secondaryBackgroundColor": "#121820",
+      "theme.textColor": "#E6EDF3"
+    },
+    "light": {
+      "theme.primaryColor": "#B45309",
+      "theme.backgroundColor": "#F7F7F4",
+      "theme.secondaryBackgroundColor": "#FFFFFF",
+      "theme.textColor": "#14181D"
+    }
+  },
+  "files": {
+    "streamlit_app.py": "py/data_explorer/app/streamlit_app.py",
+    "pages/2_Overview.py": "py/data_explorer/app/pages/2_Overview.py",
+    "pages/3_Quality.py": "py/data_explorer/app/pages/3_Quality.py",
+    "pages/4_Explore.py": "py/data_explorer/app/pages/4_Explore.py",
+    "pages/5_Visualise.py": "py/data_explorer/app/pages/5_Visualise.py",
+    "pages/6_Download.py": "py/data_explorer/app/pages/6_Download.py",
+    "data_explorer/__init__.py": "py/data_explorer/__init__.py",
+    "data_explorer/_versions.py": "py/data_explorer/_versions.py",
+    "data_explorer/core/__init__.py": "py/data_explorer/core/__init__.py",
+    "data_explorer/core/io.py": "py/data_explorer/core/io.py",
+    "data_explorer/core/profile.py": "py/data_explorer/core/profile.py",
+    "data_explorer/core/quality.py": "py/data_explorer/core/quality.py",
+    "data_explorer/core/filters.py": "py/data_explorer/core/filters.py",
+    "data_explorer/core/charts.py": "py/data_explorer/core/charts.py",
+    "data_explorer/core/export.py": "py/data_explorer/core/export.py",
+    "data_explorer/app/__init__.py": "py/data_explorer/app/__init__.py",
+    "data_explorer/app/state.py": "py/data_explorer/app/state.py",
+    "data_explorer/app/ui.py": "py/data_explorer/app/ui.py",
+    "data_explorer/app/cache.py": "py/data_explorer/app/cache.py",
+    "data_explorer/samples/retail_orders.csv": "py/data_explorer/samples/retail_orders.csv",
+    "data_explorer/samples/sensor_readings.csv": "py/data_explorer/samples/sensor_readings.csv",
+    "data_explorer/samples/client_survey.xlsx": "py/data_explorer/samples/client_survey.xlsx"
+  }
+}
+  </script>
+  <script type="module">
+    import { mountBanner } from './kit/kit.js';
+
+    const STLITE_CSS = 'https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.0/build/stlite.css';
+    const STLITE_JS = 'https://cdn.jsdelivr.net/npm/@stlite/browser@1.12.0/build/stlite.js';
+    const REPO_URL = 'https://github.com/HARISPAARTAN/data-explorer-app';
+    const root = document.getElementById('root');
+
+    mountBanner({ repoUrl: REPO_URL });
+
+    // Pyodide 314 needs module workers: the Worker constructor reads `type` only when it supports it.
+    function supportsModuleWorkers() {
+      let asked = false;
+      const options = {
+        get type() {
+          asked = true;
+          return 'module';
+        },
+      };
+      let url = '';
+      try {
+        url = URL.createObjectURL(new Blob([''], { type: 'text/javascript' }));
+        new Worker(url, options).terminate();
+      } catch {
+        return false;
+      } finally {
+        if (url) URL.revokeObjectURL(url);
+      }
+      return asked;
+    }
+
+    function showFallback(reason) {
+      root.replaceChildren(document.getElementById('fallback').content.cloneNode(true));
+      root.dataset.state = 'fallback';
+      console.info(`The live demo did not start: ${reason}.`);
+    }
+
+    function loadStylesheet(href) {
+      return new Promise((resolve, reject) => {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = href;
+        link.addEventListener('load', resolve, { once: true });
+        link.addEventListener('error', () => reject(new Error(`${href} did not load`)), { once: true });
+        document.head.append(link);
+      });
+    }
+
+    async function start() {
+      if (typeof WebAssembly !== 'object' || !supportsModuleWorkers()) {
+        showFallback('WebAssembly or module workers are not available');
+        return;
+      }
+      const config = JSON.parse(document.getElementById('app-config').textContent);
+      const theme = window.pfTheme && window.pfTheme.get() === 'light' ? 'light' : 'dark';
+      let stlite;
+      try {
+        [stlite] = await Promise.all([import(STLITE_JS), loadStylesheet(STLITE_CSS)]);
+      } catch (error) {
+        showFallback(`the runtime could not be downloaded (${error.message})`);
+        return;
+      }
+      const files = Object.fromEntries(Object.entries(config.files).map(([path, url]) => [path, { url }]));
+      stlite.mount(
+        {
+          entrypoint: config.entrypoint,
+          requirements: config.requirements,
+          streamlitConfig: { ...config.streamlitConfig, 'theme.base': theme, ...config.themes[theme] },
+          files,
+        },
+        root,
+      );
+      root.dataset.state = 'mounted';
+    }
+
+    start();
+  </script>
+</body>
+</html>

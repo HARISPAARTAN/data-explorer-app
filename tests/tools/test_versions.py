@@ -1,3 +1,7 @@
+"""Installed versions, pyproject pins, _versions.py and the stlite page agree (ADR 0004)."""
+
+from __future__ import annotations
+
 import tomllib
 from importlib.metadata import version
 from pathlib import Path
@@ -28,3 +32,18 @@ def test_pyproject_pins_equal_versions_module(repo_root: Path) -> None:
     ):
         assert f"{name}=={pin}" in dependencies
     assert project["version"] == __version__
+
+
+def test_stlite_page_pins(repo_root: Path) -> None:
+    html = (repo_root / "web" / "index.html").read_text(encoding="utf-8")
+    assert html.count(f"@stlite/browser@{_versions.STLITE}") == 2
+    assert html.count("@stlite/browser@") == 2
+    base = f"https://cdn.jsdelivr.net/npm/@stlite/browser@{_versions.STLITE}/build/"
+    assert f"const STLITE_CSS = '{base}stlite.css';" in html
+    assert f"const STLITE_JS = '{base}stlite.js';" in html
+    assert html.count(f"openpyxl=={_versions.OPENPYXL}") == 1
+
+
+def test_browser_runtime_constants() -> None:
+    assert _versions.PYODIDE.split(".")[0] == _versions.PYODIDE_PYTHON.replace(".", "")
+    assert _versions.STLITE == "1.12.0" and _versions.PYODIDE == "314.0.3"
