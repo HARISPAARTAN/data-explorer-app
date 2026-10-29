@@ -24,6 +24,9 @@
       overflow: auto;
       transform: translateZ(0);
     }
+    /* Streamlit sizes its main column with height: 100dvh, which ignores the banner above #root; follow the frame. */
+    #root [data-testid="stAppViewContainer"] > div,
+    #root [data-testid="stMain"] { height: 100%; }
     .de-intro { box-sizing: border-box; max-width: 760px; margin: var(--space-6) auto; padding-inline: var(--gutter); }
     .de-intro .pf-card { display: grid; gap: var(--space-3); }
     .de-intro p, .de-intro h1 { margin: 0; }

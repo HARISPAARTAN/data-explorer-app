@@ -153,8 +153,8 @@ const shot = async (name) => {
   await page.screenshot({ path: path.join(OUT, name) });
 };
 // Scroll the app's main area so that the element's top sits `margin` px below the main area's top, which leaves
-// room for Streamlit's header. Only the main area moves: element.scrollIntoView() would also shift the app
-// frame (stMain is as tall as the window, the frame is 40 px shorter below the banner), and the sidebar with it.
+// room for Streamlit's header (60 px, opaque). Only the main area moves: web/index.html sizes stMain to the
+// frame below the banner, and element.scrollIntoView() would still be free to shift the frame itself.
 const scrollMain = (locator, margin = 80) =>
   locator.first().evaluate((element, offset) => {
     const main = element.closest('[data-testid="stMain"]');
@@ -205,9 +205,10 @@ if (booted) {
     await openPage('Explore', 'Explore');
     const caption = app.getByText('6,060 of 6,060 rows match (100.0 %)', { exact: true });
     await visible(caption);
-    // The result sits below the filter builder: bring its heading to the top so that the 1440 x 900 frame
-    // holds the caption and the start of the table.
-    await scrollMain(app.getByRole('heading', { name: 'Result', exact: true }), 60);
+    // The result sits below the filter builder: scroll to the end of the page, where the 1440 x 900 frame holds
+    // the heading, the caption and the table. The page ends with about 140 px of padding, so a margin of 150
+    // reaches that end without relying on the browser to clamp the scroll position.
+    await scrollMain(app.getByRole('heading', { name: 'Result', exact: true }), 150);
     await page.waitForTimeout(500);
     await shot('explore-1440.png');
   });
@@ -217,9 +218,13 @@ if (booted) {
     await app.locator('[data-testid="stRadio"]').getByText('Line', { exact: true }).click();
     await visible(app.getByText('Weekly count of rows; weeks run Monday to Sunday.', { exact: true }));
     await visible(app.locator('.vega-embed canvas, .vega-embed svg'));
-    // The chart starts below the controls and its bottom edge is below the fold of a 1440 x 900 frame: scroll
-    // until the whole chart, with its axes, is in view.
-    await scrollMain(app.locator('.vega-embed'), 120);
+    // The chart starts below the controls and its bottom edge is below the fold of a 1440 x 900 frame: put the
+    // Measure control 70 px below the top of the main area (Streamlit's header is 60 px tall and opaque, and the
+    // control above stays hidden behind it), which leaves the controls, the whole chart with its axes and the
+    // caption in view.
+    await scrollMain(app.locator('[data-testid="stSelectbox"]').filter({ hasText: 'Measure' }), 70);
+    // The pointer rests where the Line option was; over the chart it would show Streamlit's chart toolbar.
+    await page.mouse.move(1400, 880);
     await page.waitForTimeout(1500);
     await shot('visualise-1440.png');
     await page.screenshot({ path: path.join(OUT, 'thumb-1440.jpg'), type: 'jpeg', quality: THUMB_QUALITY });
