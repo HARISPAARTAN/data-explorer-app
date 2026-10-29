@@ -10,7 +10,10 @@ Deutsch: [README.de.md](README.de.md)
 
 ## Status
 
-Not released and not published yet. CI has not run yet. This section lists only checked facts: the result of the last CI run, the date and browser of the last smoke test of the live demo, the measured download size of a first visit and the latest release. It is filled in once CI and the smoke test of the live page have run.
+- CI passed on 2026-10-29 for commit `2e665c0`: lint, tests on Ubuntu and Windows with Python 3.11, 3.12 and 3.13, the core tests on Python 3.14, the Docker image with its health check, and the browser smoke test ([run](https://github.com/HARISPAARTAN/data-explorer-app/actions/runs/40886298431)).
+- The live demo passed its smoke test on 2026-10-29 in Chromium 156.0.8078.4 (Playwright 1.64.1): start, the retail and survey samples, a chart, the CSV download, an upload that sends no data, the 390 px layout, and the fallback without WebAssembly.
+- A first visit downloads 30.7 MB, 30.0 MB of it from cdn.jsdelivr.net (measured by that smoke test).
+- Not released yet.
 
 ### Known limitations
 

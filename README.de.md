@@ -10,7 +10,10 @@ English: [README.md](README.md)
 
 ## Status
 
-Noch nicht veröffentlicht. CI ist noch nicht gelaufen. Dieser Abschnitt nennt nur geprüfte Fakten: das Ergebnis des letzten CI-Laufs, Datum und Browser des letzten Smoke-Tests der Live-Demo, die gemessene Downloadgröße beim ersten Besuch und das letzte Release. Er wird ergänzt, sobald CI und der Smoke-Test der Live-Seite gelaufen sind.
+- CI am 2026-10-29 für Commit `2e665c0` bestanden: Lint, Tests auf Ubuntu und Windows mit Python 3.11, 3.12 und 3.13, die Kern-Tests auf Python 3.14, das Docker-Image mit Health-Check und der Browser-Smoke-Test ([Lauf](https://github.com/HARISPAARTAN/data-explorer-app/actions/runs/40886298431)).
+- Die Live-Demo hat ihren Smoke-Test am 2026-10-29 in Chromium 156.0.8078.4 (Playwright 1.64.1) bestanden: Start, die Datensätze Einzelhandel und Umfrage, ein Diagramm, der CSV-Download, ein Upload ohne Datenversand, die Darstellung bei 390 px und die Ersatzseite ohne WebAssembly.
+- Ein erster Besuch lädt 30,7 MB, davon 30,0 MB von cdn.jsdelivr.net (gemessen von diesem Smoke-Test).
+- Noch kein Release.
 
 ### Bekannte Einschränkungen
 
