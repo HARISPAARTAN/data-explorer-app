@@ -12,7 +12,7 @@ The demo page runs the same Streamlit app in the browser with stlite: `web/index
 
 ## Consequences
 
-- The page requests three outside hosts: cdn.jsdelivr.net, pypi.org and files.pythonhosted.org. This is the one page in the portfolio that does; its smoke test allows the page's own origin and exactly these three, tolerates one more host, the placeholder `stlite.invalid` below `/media/` that never resolves ([the handover notes](../handover.md#known-console-messages-in-the-browser)), and fails on any other.
+- The page requests three outside hosts: cdn.jsdelivr.net, pypi.org and files.pythonhosted.org. This is the one page in the portfolio that does; its smoke test allows the page's own origin and exactly these three, tolerates one more host, the placeholder `stlite.invalid` below the page's media path (`/media/` locally, `/data-explorer-app/media/` on Pages) that never resolves ([the handover notes](../handover.md#known-console-messages-in-the-browser)), and fails on any other.
 - The first visit downloads the Python runtime and libraries; the README Status reports the measured size. Later visits use the browser cache.
 - The own-file weight limit of 3 MB applies to the repository's files on the page; the CDN bytes are measured and reported, not capped.
 - Browsers without WebAssembly or module workers (for example Firefox before 114, since Pyodide 314) see the fallback card.

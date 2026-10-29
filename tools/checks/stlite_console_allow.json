@@ -1,7 +1,7 @@
 [
   {
     "text": "Failed to load resource: net::ERR_NAME_NOT_RESOLVED",
-    "url_prefix": "https://stlite.invalid/media/",
+    "media_check": true,
     "reason": "stlite 1.12.0 media URLs use the placeholder host stlite.invalid, which never resolves; Streamlit's download button checks its URL when it renders, the download itself works. No upstream issue found."
   },
   {

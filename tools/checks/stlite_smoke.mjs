@@ -2,8 +2,9 @@
 // against the live Pages URL. Fails on any console error or page error (except exact texts allowed in
 // stlite_console_allow.json with an upstream issue link or a stated reason), on any request to a host other than the page's own
 // origin, cdn.jsdelivr.net, pypi.org and files.pythonhosted.org, and on any step that does not finish in time.
-// One host is tolerated, and only below /media/: stlite.invalid, the placeholder host (.invalid never resolves) in
-// the media URLs that Streamlit's download button checks when it renders. stlite 1.12.0 cannot answer that check,
+// One host is tolerated, and only below the page's media path (/media/ locally, /data-explorer-app/media/ on
+// Pages): stlite.invalid, the placeholder host (.invalid never resolves) in the media URLs that Streamlit's
+// download button checks when it renders. stlite 1.12.0 cannot answer that check,
 // the download itself works (the Download step saves the file and counts its lines). Those requests are counted
 // and printed as "stlite media-check misses", never as external requests; any other path on that host fails.
 // The number of allow-listed console messages that fired is printed too, so an allow-list entry that has become
@@ -31,6 +32,10 @@ const BOOT_TIMEOUT = 240_000;
 const STEP_TIMEOUT = 120_000;
 const ORIGIN = new URL(PAGE_URL).host;
 const MEDIA_CHECK_HOST = 'stlite.invalid';
+// stlite builds its media URLs from the page's own path, so the probe is /media/... locally and
+// /data-explorer-app/media/... on Pages.
+const MEDIA_CHECK_PATH = new URL('media/', PAGE_URL).pathname;
+const MEDIA_CHECK_URL = `https://${MEDIA_CHECK_HOST}${MEDIA_CHECK_PATH}`;
 const ALLOWED_HOSTS = new Set([ORIGIN, 'cdn.jsdelivr.net', 'pypi.org', 'files.pythonhosted.org']);
 const UPLOAD_FIXTURE = path.join(REPO, 'fixtures', 'utf8_bom_semicolon_decimal_comma.csv');
 
@@ -45,8 +50,9 @@ if (OUT === REPO || OUT.startsWith(REPO + path.sep)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 // An allow-list entry is { text, issue } with an upstream stlite issue link or, while no upstream issue exists,
-// { text, reason } with the reason in words. An optional url_prefix limits the entry to console messages whose
-// source URL starts with it. The two entries in the file belong to the stlite.invalid media check described above.
+// { text, reason } with the reason in words. An optional media_check: true limits the entry to console messages
+// whose source URL is the stlite.invalid media probe described above (its path follows the page's path). The two
+// entries in the file belong to that media check.
 const allowList = JSON.parse(fs.readFileSync(path.join(HERE, 'stlite_console_allow.json'), 'utf8'));
 for (const entry of allowList) {
   const linked = /^https:\/\/github\.com\/whitphx\/stlite\/issues\/\d+$/.test(entry.issue ?? '');
@@ -58,7 +64,7 @@ for (const entry of allowList) {
 }
 const isAllowed = (message) =>
   allowList.some(
-    (entry) => entry.text === message.text() && (!entry.url_prefix || (message.location().url ?? '').startsWith(entry.url_prefix)),
+    (entry) => entry.text === message.text() && (!entry.media_check || (message.location().url ?? '').startsWith(MEDIA_CHECK_URL)),
   );
 
 async function loadPlaywright() {
@@ -102,7 +108,7 @@ function watch(context, page, label, hosts) {
   context.on('request', (request) => {
     const url = new URL(request.url());
     if (url.protocol === 'blob:' || url.protocol === 'data:') return;
-    if (url.host === MEDIA_CHECK_HOST && url.pathname.startsWith('/media/')) mediaMisses.push(request.url());
+    if (url.host === MEDIA_CHECK_HOST && url.pathname.startsWith(MEDIA_CHECK_PATH)) mediaMisses.push(request.url());
     else if (!ALLOWED_HOSTS.has(url.host)) fail(`${label}: request to ${url.host}: ${request.url()}`);
     if (request.method() !== 'GET') nonGet.push(`${request.method()} ${request.url()}`);
   });
