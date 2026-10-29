@@ -304,3 +304,137 @@ def test_format_parse_round_trip(spec: FilterSpec) -> None:
 def test_view_json_round_trip(spec: FilterSpec, chosen: tuple[str, ...] | None, sort: list[SortKey]) -> None:
     view = ViewSpec(spec, chosen, tuple(sort))
     assert view_from_json(view_to_json(view)) == view
+
+
+# --- integers above 2**53 stay exact -------------------------------------------------------------
+
+BIG = 2**53
+
+
+def big_frame(dtype: str) -> pd.DataFrame:
+    return pd.DataFrame({"v": pd.Series([BIG, BIG + 1, BIG + 2], dtype=dtype)})
+
+
+@pytest.mark.parametrize("dtype", ["int64", "uint64", "Int64", "UInt64"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"`v` = {BIG + 1}", [1]),
+        (f"`v` != {BIG + 1}", [0, 2]),
+        (f"`v` < {BIG + 1}", [0]),
+        (f"`v` <= {BIG + 1}", [0, 1]),
+        (f"`v` > {BIG + 1}", [2]),
+        (f"`v` >= {BIG + 1}", [1, 2]),
+        (f"`v` BETWEEN {BIG + 1} AND {BIG + 1}", [1]),
+        (f"`v` BETWEEN {BIG} AND {BIG + 1}", [0, 1]),
+        (f"`v` IN ({BIG + 1}, {BIG + 2})", [1, 2]),
+        (f"`v` IN ({BIG + 1})", [1]),
+        (f"`v` NOT IN ({BIG + 1})", [0, 2]),
+        (f"`v` = {BIG + 3}", []),
+    ],
+)
+def test_large_integers_compare_exactly(dtype: str, text: str, expected: list[int]) -> None:
+    assert rows(big_frame(dtype), text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"`v` = {BIG + 1}", [1]),
+        (f"`v` != {BIG + 1}", [0, 3]),
+        (f"`v` < {BIG + 2}", [0, 1]),
+        (f"`v` >= {BIG + 1}", [1, 3]),
+        (f"`v` BETWEEN {BIG + 1} AND {BIG + 2}", [1, 3]),
+        (f"`v` IN ({BIG}, {BIG + 2})", [0, 3]),
+        (f"`v` NOT IN ({BIG + 1})", [0, 3]),
+        ("`v` IS NULL", [2]),
+        ("`v` IS NOT NULL", [0, 1, 3]),
+    ],
+)
+def test_large_nullable_integers_skip_missing_values(text: str, expected: list[int]) -> None:
+    frame = pd.DataFrame({"v": pd.Series([BIG, BIG + 1, None, BIG + 2], dtype="Int64")})
+    assert rows(frame, text) == expected
+
+
+def test_integer_literals_beyond_the_column_range_and_backwards_between() -> None:
+    for dtype in ("int64", "Int64"):
+        frame = big_frame(dtype)
+        assert rows(frame, f"`v` < {10**20}") == [0, 1, 2]
+        assert rows(frame, f"`v` > -{10**20}") == [0, 1, 2]
+        assert rows(frame, f"`v` = {10**20}") == [] and rows(frame, f"`v` > {10**20}") == []
+        assert rows(frame, f"`v` IN ({10**20}, {BIG + 2})") == [2]
+    issues = validate(parse_filter(f"`v` BETWEEN {BIG + 1} AND {BIG}"), big_frame("int64"))
+    assert [issue.message for issue in issues] == ["Condition 1: BETWEEN needs the smaller value first."]
+
+
+def test_decimal_literals_on_integer_columns_still_use_floats() -> None:
+    frame = pd.DataFrame(
+        {
+            "i": pd.Series([1, 2, 3], dtype="int64"),
+            "m": pd.Series([1, None, 3], dtype="Int64"),
+        }
+    )
+    assert rows(frame, "`i` > 1.5") == [1, 2]
+    assert rows(frame, "`i` = 2.0") == [1]
+    assert rows(frame, "`i` BETWEEN 1 AND 2.5") == [0, 1]
+    assert rows(frame, "`i` IN (1, 2.5)") == [0]
+    assert rows(frame, "`m` < 2.5") == [0]
+    assert rows(frame, "`m` NOT IN (1.0)") == [2]
+    assert rows(frame, "`i` = 2") == [1] and rows(frame, "`m` >= 2") == [2]
+
+
+# --- pathological numbers ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "number",
+    [
+        "9" * 4301,
+        "9" * 400,
+        "-" + "9" * 400,
+        "9" * 309,
+        "0" * 4301 + "1",
+        "9" * 400 + ".5",
+        "-" + "9" * 400 + ".5",
+        "1" + "0" * 309 + ".0",
+    ],
+)
+def test_oversized_number_literals_are_syntax_errors(number: str) -> None:
+    for text, position in [
+        (f"`n` = {number}", 6),
+        (f"`n` BETWEEN 1 AND {number}", 18),
+        (f"`n` IN (1, {number})", 11),
+    ]:
+        with pytest.raises(FilterSyntaxError) as caught:
+            parse_filter(text)
+        assert caught.value.position == position
+        assert caught.value.expected == "a smaller number (this one is too large)"
+
+
+def test_largest_float_sized_literals_still_parse_and_round_trip() -> None:
+    biggest = int("1" + "0" * 308)
+    assert parse_filter(f"`x` > {biggest}").conditions[0].value == biggest
+    assert rows(pd.DataFrame({"x": [1.0, 1e308, 5e307]}), f"`x` >= {biggest}") == [1]
+    assert parse_filter("`x` = 0." + "1" * 400).conditions[0].value == float("0." + "1" * 400)
+    for value in (1.7976931348623157e308, -1.7976931348623157e308, 5e-324, 2.2250738585072014e-308):
+        spec = FilterSpec(conditions=(Condition("x", Op.LE, value),))
+        assert parse_filter(format_filter(spec)) == spec
+
+
+def test_oversized_numbers_in_built_conditions_are_filter_errors(frame: pd.DataFrame) -> None:
+    for condition in (
+        Condition("n", Op.EQ, 10**400),
+        Condition("n", Op.BETWEEN, (1, 10**400)),
+        Condition("n", Op.IN, (1, -(10**400))),
+        Condition("x", Op.GT, 10**309),
+        Condition("x", Op.GT, float("inf")),
+    ):
+        spec = FilterSpec(conditions=(condition,))
+        assert validate(spec, frame)[0].message.endswith("so the value must be a number.")
+        with pytest.raises(FilterError):
+            apply_filter(frame, spec)
+    from_json = view_from_json(
+        '{"filter":{"mode":"all","conditions":[{"column":"n","op":"eq","value":' + "9" * 400 + "}]}}"
+    )
+    with pytest.raises(FilterError):
+        apply_view(frame, from_json)

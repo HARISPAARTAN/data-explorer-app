@@ -9,7 +9,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, NoReturn, TypeAlias
+from typing import Any, Literal, NoReturn, TypeAlias, cast
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,10 @@ from data_explorer.core.profile import Kind, classify
 
 MAX_CONDITIONS = 10
 MAX_SORT_KEYS = 3
+# The largest float is about 1.8e308 (309 digits): a whole-number literal with more digits can never be a
+# filter number, and the cap keeps int() clear of Python's 4300-digit conversion limit.
+MAX_INTEGER_DIGITS = 309
+TOO_LARGE = "a smaller number (this one is too large)"
 
 
 class Op(enum.StrEnum):
@@ -147,7 +151,13 @@ def parse_date_literal(text: str) -> tuple[pd.Timestamp, bool] | None:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    """A finite int or float; an integer too big for any float is not a number (and never raises)."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _items(condition: Condition) -> list[Scalar] | str:
@@ -184,7 +194,7 @@ def _condition_issue(index: int, condition: Condition, df: pd.DataFrame) -> str 
     if kind == "numeric":
         if not all(_is_number(item) for item in items):
             return f"{prefix}: `{column}` is numeric, so the value must be a number."
-        if condition.op == Op.BETWEEN and float(items[0]) > float(items[1]):
+        if condition.op == Op.BETWEEN and cast(float, items[0]) > cast(float, items[1]):
             return f"{prefix}: BETWEEN needs the smaller value first."
     elif kind == "datetime":
         dates = [parse_date_literal(item) if isinstance(item, str) else None for item in items]
@@ -244,9 +254,21 @@ def _bool(result: Any) -> np.ndarray[Any, np.dtype[np.bool_]]:
     return np.asarray(result, dtype=bool)
 
 
+def _is_integer_column(series: pd.Series[Any]) -> bool:
+    """numpy int*/uint* and nullable Int*/UInt*; Arrow-backed integers stay on the float path."""
+    return pd.api.types.is_integer_dtype(series.dtype) and not isinstance(series.dtype, pd.ArrowDtype)
+
+
 def _numeric_mask(series: pd.Series[Any], op: Op, items: list[Scalar]) -> np.ndarray[Any, np.dtype[np.bool_]]:
-    numbers = series.astype("float64")
-    values = [float(item) for item in items]
+    # An integer column compared with whole numbers is compared as integers: float64 would merge
+    # neighbours above 2**53. A decimal literal (or any other dtype) takes the float64 route.
+    whole = all(isinstance(item, int) and not isinstance(item, bool) for item in items)
+    if whole and _is_integer_column(series):
+        numbers: pd.Series[Any] = series
+        values: list[Any] = list(items)
+    else:
+        numbers = series.astype("float64")
+        values = [float(item) for item in items]
     if op == Op.EQ:
         return _bool(numbers == values[0])
     if op == Op.NE:
@@ -554,7 +576,17 @@ class _Parser:
             if not self._digits():
                 self.fail("a digit")
         token = self.text[start : self.pos]
-        return float(token) if "." in token else int(token)
+        if "." in token:
+            decimal = float(token)
+            if not math.isfinite(decimal):
+                self.fail(TOO_LARGE, start)
+            return decimal
+        if len(token.lstrip("-")) > MAX_INTEGER_DIGITS:
+            self.fail(TOO_LARGE, start)
+        integer = int(token)
+        if not _is_number(integer):
+            self.fail(TOO_LARGE, start)
+        return integer
 
     def _digits(self) -> bool:
         start = self.pos
