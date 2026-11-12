@@ -2,7 +2,7 @@
 # Base and uv images pinned by digest (multi-arch index, resolved 2026-10-29 from the registries' manifest API, the value docker buildx imagetools inspect prints).
 # python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 # ghcr.io/astral-sh/uv:0.11.8@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347
-FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS base
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
 # --- Python dependencies from uv.lock (the set the tests ran), then the project itself, both non-editable
 FROM base AS deps
