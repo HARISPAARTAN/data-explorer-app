@@ -41,11 +41,11 @@ data-explorer = "data_explorer.cli:main"
 
 [dependency-groups]
 dev = [
-  "hypothesis==6.170.13",
+  "hypothesis==6.170.15",
   "mypy==2.4.1",
-  "pandas-stubs==3.0.5.260914",
+  "pandas-stubs==3.1.0.261029",
   "pytest==9.2.0",
-  "ruff==0.17.3",
+  "ruff==0.17.4",
   "types-openpyxl==3.1.5.20261017",
 ]
 
